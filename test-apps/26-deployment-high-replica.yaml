@@ -1,0 +1,29 @@
+# Very high replica count
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-high-replica
+  namespace: default
+  labels:
+    app: test-high-replica
+    test-type: high-replica
+spec:
+  replicas: 20
+  selector:
+    matchLabels:
+      app: test-high-replica
+  template:
+    metadata:
+      labels:
+        app: test-high-replica
+        test-type: high-replica
+    spec:
+      containers:
+        - name: app
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi

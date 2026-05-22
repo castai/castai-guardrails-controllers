@@ -1,0 +1,49 @@
+# Test JVM Probe Controller - Bypass annotation
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-jvm-bypass
+  namespace: default
+  annotations:
+    workloads.cast.ai/jvm-probe-bypass: "true"
+  labels:
+    app: test-jvm-bypass
+    test-type: jvm-bypass
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: test-jvm-bypass
+  template:
+    metadata:
+      labels:
+        app: test-jvm-bypass
+        test-type: jvm-bypass
+    spec:
+      containers:
+        - name: spring-app
+          image: nginx:alpine
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "production"
+            - name: JAVA_HOME
+              value: "/usr/lib/jvm/java-17-openjdk"
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-jvm-bypass
+  namespace: default
+spec:
+  selector:
+    app: test-jvm-bypass
+  ports:
+    - port: 8080
+      targetPort: 8080

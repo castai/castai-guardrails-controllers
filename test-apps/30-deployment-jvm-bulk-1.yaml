@@ -1,0 +1,34 @@
+# Bulk JVM apps - many replicas
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-jvm-bulk-1
+  namespace: default
+  labels:
+    app: test-jvm-bulk-1
+    test-type: jvm-bulk
+spec:
+  replicas: 8
+  selector:
+    matchLabels:
+      app: test-jvm-bulk-1
+  template:
+    metadata:
+      labels:
+        app: test-jvm-bulk-1
+        test-type: jvm-bulk
+    spec:
+      containers:
+        - name: spring-app
+          image: nginx:alpine
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "production"
+            - name: JAVA_HOME
+              value: "/usr/lib/jvm/java-17-openjdk"
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi

@@ -1,0 +1,49 @@
+# StatefulSet with many replicas
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: test-sts-multi
+  namespace: default
+  labels:
+    app: test-sts-multi
+    test-type: sts-multi
+spec:
+  serviceName: test-sts-multi-headless
+  replicas: 8
+  selector:
+    matchLabels:
+      app: test-sts-multi
+  template:
+    metadata:
+      labels:
+        app: test-sts-multi
+        test-type: sts-multi
+    spec:
+      containers:
+        - name: app
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-sts-multi-headless
+  namespace: default
+spec:
+  clusterIP: None
+  selector:
+    app: test-sts-multi
+  ports:
+    - port: 80
+      targetPort: 80

@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app-no-tsc
+  namespace: default
+  labels:
+    app: test-app-no-tsc
+    test-type: tsc-validation
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: test-app-no-tsc
+  template:
+    metadata:
+      labels:
+        app: test-app-no-tsc
+        test-type: tsc-validation
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-app-no-tsc
+  namespace: default
+spec:
+  selector:
+    app: test-app-no-tsc
+  ports:
+    - port: 80
+      targetPort: 80
+  type: ClusterIP

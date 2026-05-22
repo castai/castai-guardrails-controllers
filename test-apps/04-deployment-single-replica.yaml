@@ -1,0 +1,25 @@
+# Single replica - TSC should NOT be added (needs >= 2 replicas)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app-single-replica
+  namespace: default
+  labels:
+    app: test-app-single-replica
+    test-type: tsc-single-replica
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-app-single-replica
+  template:
+    metadata:
+      labels:
+        app: test-app-single-replica
+        test-type: tsc-single-replica
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
