@@ -65,22 +65,15 @@ spec:
               containerPort: 8081
               protocol: TCP
           {{- end }}
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: 8081
-            initialDelaySeconds: 15
-            periodSeconds: 20
-            timeoutSeconds: 5
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: 8081
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+          # Health probes disabled - custom image doesn't expose health endpoints
+          # livenessProbe:
+          #   httpGet:
+          #     path: /healthz
+          #     port: 8081
+          # readinessProbe:
+          #   httpGet:
+          #     path: /readyz
+          #     port: 8081
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           env:

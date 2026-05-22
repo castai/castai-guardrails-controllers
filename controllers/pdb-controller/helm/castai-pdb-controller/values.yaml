@@ -6,6 +6,8 @@ replicaCount: 2
 image:
   repository: marcusarenas/castai-pdb-controller
   tag: "latest"
+  # Official image: us-docker.pkg.dev/castai-hub/library/castai-pdb-controller
+  # (requires GCR authentication, use custom image instead)
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
