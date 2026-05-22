@@ -4,8 +4,8 @@
 replicaCount: 2
 
 image:
-  repository: castai/pdb-controller
-  tag: latest
+  repository: us-docker.pkg.dev/castai-hub/library/castai-pdb-controller
+  tag: "0.5"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []

@@ -50,11 +50,7 @@ spec:
         - name: controller
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args:
-            - --config-map-name=castai-pdb-controller-config
-            - --leader-elect=true
-            - --metrics-bind-address=:8080
-            - --health-probe-bind-address=:8081
+          # Official PDB controller uses environment variables, not CLI args
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           {{- if .Values.service.enabled }}
