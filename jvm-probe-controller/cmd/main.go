@@ -220,9 +220,47 @@ func handleConfigMapUpdate(cm *corev1.ConfigMap) {
 	}
 }
 
+// shouldProcess returns false if the controller should skip this workload
+func shouldProcess() bool {
+	configLock.RLock()
+	defer configLock.RUnlock()
+	return config.Enabled && config.Mode != JVMModeDisabled
+}
+
+// isAuditMode returns true if we should only log, not apply
+func isAuditMode() bool {
+	configLock.RLock()
+	defer configLock.RUnlock()
+	return config.Mode == JVMModeAudit
+}
+
 // parseConfigMap parses the ConfigMap into JVMConfig
 func parseConfigMap(cm *corev1.ConfigMap) *JVMConfig {
 	cfg := DefaultJVMConfig()
+
+	// Parse gate settings
+	if val, ok := cm.Data["enabled"]; ok {
+		cfg.Enabled = val == "true" || val == "1"
+	}
+
+	if val, ok := cm.Data["mode"]; ok {
+		switch val {
+		case JVMModeApply, JVMModeAudit, JVMModeDisabled:
+			cfg.Mode = val
+		}
+	}
+
+	if val, ok := cm.Data["injectLiveness"]; ok {
+		cfg.InjectLiveness = val != "false" && val != "0"
+	}
+
+	if val, ok := cm.Data["injectReadiness"]; ok {
+		cfg.InjectReadiness = val != "false" && val != "0"
+	}
+
+	if val, ok := cm.Data["injectStartup"]; ok {
+		cfg.InjectStartup = val != "false" && val != "0"
+	}
 
 	if data, ok := cm.Data["jvm-frameworks"]; ok {
 		if err := json.Unmarshal([]byte(data), &cfg.Frameworks); err != nil {
@@ -249,6 +287,9 @@ func parseConfigMap(cm *corev1.ConfigMap) *JVMConfig {
 	if val, ok := cm.Data["jvm-exclusions"]; ok {
 		cfg.Exclusions = val
 	}
+
+	logInfo("config-loaded", "Configuration loaded: enabled=%v, mode=%s, injectLiveness=%v, injectReadiness=%v, injectStartup=%v",
+		cfg.Enabled, cfg.Mode, cfg.InjectLiveness, cfg.InjectReadiness, cfg.InjectStartup)
 
 	return &cfg
 }
@@ -292,10 +333,18 @@ func (c *Controller) Run(ctx context.Context, workers int) error {
 		go c.runWorker(ctx)
 	}
 
-	// Start periodic reconciliation
-	go c.runPeriodicReconciliation(ctx)
+	// Check gate settings before starting loops
+	configLock.RLock()
+	enabled := config.Enabled
+	mode := config.Mode
+	configLock.RUnlock()
 
-	// Start garbage collection
+	// Start periodic reconciliation (only if not disabled)
+	if enabled && mode != JVMModeDisabled {
+		go c.runPeriodicReconciliation(ctx)
+	}
+
+	// Start garbage collection (always runs to clean up if mode changes)
 	go c.runGarbageCollection(ctx)
 
 	<-ctx.Done()
@@ -364,6 +413,11 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 
 // processWorkload processes a single workload
 func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cfg *JVMConfig) error {
+	// Check master gate - if disabled, do nothing
+	if !shouldProcess() {
+		return nil
+	}
+
 	var name, namespace string
 	var annotations map[string]string
 	var spec *corev1.PodSpec
@@ -440,12 +494,11 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 		hasReadiness := container.ReadinessProbe != nil
 		hasStartup := container.StartupProbe != nil
 
-		// Determine which probes need injection
-		needsLiveness := (!hasLiveness || overwriteLiveness) && (overwriteLiveness || !cfg.SkipIfAnyProbeExists)
-		needsReadiness := (!hasReadiness || overwriteReadiness) && (overwriteReadiness || !cfg.SkipIfAnyProbeExists)
-		// ALWAYS inject startup probe if missing - it's critical for JVM apps
-		// This prevents pods being killed during long startup times
-		needsStartup := !hasStartup || overwriteStartup
+		// Determine which probes need injection (respecting gate settings)
+		needsLiveness := (!hasLiveness || overwriteLiveness) && (overwriteLiveness || !cfg.SkipIfAnyProbeExists) && cfg.InjectLiveness
+		needsReadiness := (!hasReadiness || overwriteReadiness) && (overwriteReadiness || !cfg.SkipIfAnyProbeExists) && cfg.InjectReadiness
+		// Startup probe injection - critical for JVM apps (unless explicitly disabled)
+		needsStartup := (!hasStartup || overwriteStartup) && cfg.InjectStartup
 
 		if !needsLiveness && !needsReadiness && !needsStartup {
 			logInfo("skip", "Container %s in %s already has all probes configured", container.Name, nn)
@@ -534,6 +587,15 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 
 	if !modified {
 		logDebug("skip", "No probes needed for workload %s", nn)
+		workloadsLock.Lock()
+		workloadsProcessed[nn] = true
+		workloadsLock.Unlock()
+		return nil
+	}
+
+	// Audit mode - just log what would happen
+	if isAuditMode() {
+		logInfo("audit-would-apply", "[AUDIT] Would apply %d probe patches to workload %s", len(allPatches), nn)
 		workloadsLock.Lock()
 		workloadsProcessed[nn] = true
 		workloadsLock.Unlock()
@@ -692,6 +754,10 @@ func (c *Controller) runGarbageCollection(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Check gate settings
+			if !shouldProcess() {
+				continue
+			}
 			logInfo("gc", "Running garbage collection")
 			c.garbageCollect(ctx)
 		}
