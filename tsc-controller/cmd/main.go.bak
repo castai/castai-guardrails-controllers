@@ -63,27 +63,7 @@ var (
 	workloadsLock    sync.Mutex
 )
 
-// Controller mode
-const (
-	ModeApply    = "apply"
-	ModeAudit    = "audit"
-	ModeDisabled = "disabled"
-)
-
-// TSCConfig holds the controller configuration
 type TSCConfig struct {
-	// Master gate - completely enable/disable the controller
-	Enabled bool `json:"enabled"`
-
-	// Mode: apply (default), audit (log only), disabled (do nothing)
-	Mode string `json:"mode"`
-
-	// Apply rules
-	EnforceOnNew           bool `json:"enforceOnNew"`
-	EnforceOnUpdate        bool `json:"enforceOnUpdate"`
-	GarbageCollect         bool `json:"garbageCollect"`
-
-	// Topology settings
 	DefaultConstraints     []corev1.TopologySpreadConstraint `json:"defaultConstraints"`
 	LogInterval            time.Duration                     `json:"logInterval"`
 	ReconcileInterval      time.Duration                     `json:"reconcileInterval"`
@@ -205,13 +185,6 @@ func loadConfig() {
 	defer configLock.Unlock()
 
 	config = &TSCConfig{
-		Enabled: true, // Master gate - enabled by default
-		Mode:    ModeApply,
-
-		EnforceOnNew:           true,
-		EnforceOnUpdate:        true,
-		GarbageCollect:         true,
-
 		DefaultConstraints: []corev1.TopologySpreadConstraint{
 			{
 				MaxSkew:           1,
@@ -233,28 +206,32 @@ func loadConfig() {
 		return
 	}
 
-	// Parse gate settings
-	if val, ok := cm.Data["enabled"]; ok {
-		config.Enabled = val == "true" || val == "1"
-	}
-
-	if val, ok := cm.Data["mode"]; ok {
-		switch val {
-		case ModeApply, ModeAudit, ModeDisabled:
-			config.Mode = val
+	// Parse default constraints
+	if constraintsJSON, ok := cm.Data["defaultConstraints"]; ok {
+		var constraints []corev1.TopologySpreadConstraint
+		if err := json.Unmarshal([]byte(constraintsJSON), &constraints); err == nil {
+			config.DefaultConstraints = constraints
 		}
 	}
 
-	if val, ok := cm.Data["enforceOnNew"]; ok {
-		config.EnforceOnNew = val != "false" && val != "0"
+	// Parse intervals
+	if logIntv, ok := cm.Data["logInterval"]; ok {
+		if d, err := time.ParseDuration(logIntv); err == nil {
+			config.LogInterval = d
+			SetLogInterval(d)
+		}
 	}
 
-	if val, ok := cm.Data["enforceOnUpdate"]; ok {
-		config.EnforceOnUpdate = val != "false" && val != "0"
+	if recIntv, ok := cm.Data["reconcileInterval"]; ok {
+		if d, err := time.ParseDuration(recIntv); err == nil {
+			config.ReconcileInterval = d
+		}
 	}
 
-	if val, ok := cm.Data["garbageCollect"]; ok {
-		config.GarbageCollect = val != "false" && val != "0"
+	if gcIntv, ok := cm.Data["garbageCollectInterval"]; ok {
+		if d, err := time.ParseDuration(gcIntv); err == nil {
+			config.GarbageCollectInterval = d
+		}
 	}
 
 	// Parse exclusion rules
@@ -267,7 +244,7 @@ func loadConfig() {
 		}
 	}
 
-	logInfo("config-loaded", "Configuration loaded successfully: enabled=%v, mode=%s", config.Enabled, config.Mode)
+	logInfo("config-loaded", "Configuration loaded successfully")
 }
 
 func runController(ctx context.Context) {
@@ -281,8 +258,8 @@ func runController(ctx context.Context) {
 	// Add handlers for Deployments
 	deploymentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			if d, ok := obj.(*appv1.Deployment); ok && d.Spec.Replicas != nil {
-				createTSCForWorkload(ctx, "Deployment", d.Namespace, d.Name, d.Annotations, d.Spec.Template.Labels, int(*d.Spec.Replicas), true)
+			if d, ok := obj.(*appv1.Deployment); ok {
+				createTSCForWorkload(ctx, "Deployment", d.Namespace, d.Name, d.Annotations, d.Spec.Template.Labels, int(*d.Spec.Replicas))
 			}
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
@@ -301,8 +278,8 @@ func runController(ctx context.Context) {
 	// Add handlers for StatefulSets
 	statefulSetInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			if s, ok := obj.(*appv1.StatefulSet); ok && s.Spec.Replicas != nil {
-				createTSCForWorkload(ctx, "StatefulSet", s.Namespace, s.Name, s.Annotations, s.Spec.Template.Labels, int(*s.Spec.Replicas), true)
+			if s, ok := obj.(*appv1.StatefulSet); ok {
+				createTSCForWorkload(ctx, "StatefulSet", s.Namespace, s.Name, s.Annotations, s.Spec.Template.Labels, int(*s.Spec.Replicas))
 			}
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
@@ -339,70 +316,25 @@ func runController(ctx context.Context) {
 
 	logAlways("Controller started. Watching Deployments and StatefulSets...")
 
-	// Start reconciliation loop (only if not disabled)
-	configLock.RLock()
-	mode := config.Mode
-	enabled := config.Enabled
-	configLock.RUnlock()
+	// Start reconciliation loop
+	go runReconcileLoop(ctx)
 
-	if enabled && mode != ModeDisabled {
-		go runReconcileLoop(ctx)
-	}
-
-	// Start garbage collection (only if enabled and garbageCollect is true)
+	// Start garbage collection
 	go runGarbageCollection(ctx)
 
 	<-ctx.Done()
 }
 
-// shouldProcess returns false if the controller should skip this workload
-func shouldProcess() bool {
-	configLock.RLock()
-	defer configLock.RUnlock()
-	return config.Enabled && config.Mode != ModeDisabled
-}
-
-// isAuditMode returns true if we should only log, not apply
-func isAuditMode() bool {
-	configLock.RLock()
-	defer configLock.RUnlock()
-	return config.Mode == ModeAudit
-}
-
-func createTSCForWorkload(ctx context.Context, kind, namespace, name string, annotations, labels map[string]string, replicas int, isNew bool) {
+func createTSCForWorkload(ctx context.Context, kind, namespace, name string, annotations, labels map[string]string, replicas int) {
 	key := fmt.Sprintf("%s/%s/%s", kind, namespace, name)
 
-	// Check master gate - if disabled, do nothing
-	if !shouldProcess() {
+	// Check if already processed
+	workloadsLock.Lock()
+	if processedWorkloads[key] {
+		workloadsLock.Unlock()
 		return
 	}
-
-	// Check apply rules based on event type
-	if isNew {
-		configLock.RLock()
-		enforceNew := config.EnforceOnNew
-		configLock.RUnlock()
-		if !enforceNew {
-			return
-		}
-	} else {
-		configLock.RLock()
-		enforceUpdate := config.EnforceOnUpdate
-		configLock.RUnlock()
-		if !enforceUpdate {
-			return
-		}
-	}
-
-	// Check if already processed (skip for audit mode to always show what would happen)
-	if !isAuditMode() {
-		workloadsLock.Lock()
-		if processedWorkloads[key] {
-			workloadsLock.Unlock()
-			return
-		}
-		workloadsLock.Unlock()
-	}
+	workloadsLock.Unlock()
 
 	// Check bypass annotation
 	if annotations != nil {
@@ -418,25 +350,15 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 		return
 	}
 
-	// Skip if replicas < 2 (still report in audit mode)
+	// Skip if replicas < 2
 	if replicas < 2 {
-		if isAuditMode() {
-			logInfo("audit-skip", "[AUDIT] Would skip %s: replicas < 2", key)
-		} else {
-			logDebug("tsc-low-replicas", "Skipping %s, replicas < 2", key)
-		}
+		logDebug("tsc-low-replicas", "Skipping %s, replicas < 2", key)
 		return
 	}
 
 	// Build constraints
 	constraints := buildConstraints(namespace, name, annotations, labels)
 	if len(constraints) == 0 {
-		return
-	}
-
-	// Audit mode - just log what would happen
-	if isAuditMode() {
-		logInfo("audit-would-apply", "[AUDIT] Would add TSC to %s with %d constraints", key, len(constraints))
 		return
 	}
 
@@ -693,28 +615,18 @@ func isExcluded(namespace, name string, labels map[string]string) bool {
 }
 
 func runReconcileLoop(ctx context.Context) {
-	// Wait a bit before first reconciliation
-	time.Sleep(30 * time.Second)
+	configLock.RLock()
+	interval := config.ReconcileInterval
+	configLock.RUnlock()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
 	for {
-		configLock.RLock()
-		interval := config.ReconcileInterval
-		enabled := config.Enabled
-		mode := config.Mode
-		configLock.RUnlock()
-
-		if !enabled || mode == ModeDisabled {
-			return
-		}
-
-		reconcileAllWorkloads(ctx)
-
-		ticker := time.NewTicker(interval)
 		select {
 		case <-ticker.C:
-			ticker.Stop()
+			reconcileAllWorkloads(ctx)
 		case <-ctx.Done():
-			ticker.Stop()
 			return
 		}
 	}
@@ -736,7 +648,7 @@ func reconcileAllWorkloads(ctx context.Context) {
 		for _, d := range deployments.Items {
 			if d.Spec.Replicas != nil && *d.Spec.Replicas >= 2 {
 				createTSCForWorkload(ctx, "Deployment", d.Namespace, d.Name,
-					d.Annotations, d.Spec.Template.Labels, int(*d.Spec.Replicas), false)
+					d.Annotations, d.Spec.Template.Labels, int(*d.Spec.Replicas))
 			}
 		}
 	}
@@ -749,7 +661,7 @@ func reconcileAllWorkloads(ctx context.Context) {
 		for _, s := range statefulsets.Items {
 			if s.Spec.Replicas != nil && *s.Spec.Replicas >= 2 {
 				createTSCForWorkload(ctx, "StatefulSet", s.Namespace, s.Name,
-					s.Annotations, s.Spec.Template.Labels, int(*s.Spec.Replicas), false)
+					s.Annotations, s.Spec.Template.Labels, int(*s.Spec.Replicas))
 			}
 		}
 	}
@@ -776,17 +688,6 @@ func runGarbageCollection(ctx context.Context) {
 }
 
 func garbageCollectOrphanedTSCs(ctx context.Context) {
-	// Check if garbage collection is enabled
-	configLock.RLock()
-	enabled := config.Enabled
-	mode := config.Mode
-	gcEnabled := config.GarbageCollect
-	configLock.RUnlock()
-
-	if !enabled || mode == ModeDisabled || !gcEnabled {
-		return
-	}
-
 	logDebug("gc-start", "Starting garbage collection")
 
 	// Check deployments

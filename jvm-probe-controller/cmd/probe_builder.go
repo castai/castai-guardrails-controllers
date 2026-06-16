@@ -23,14 +23,33 @@ type FrameworkConfig struct {
 	UseTCPSocket         bool   `yaml:"useTCPSocket"`
 }
 
+// Controller mode
+const (
+	JVMModeApply    = "apply"
+	JVMModeAudit    = "audit"
+	JVMModeDisabled = "disabled"
+)
+
 // JVMConfig holds the overall JVM probe controller configuration
 type JVMConfig struct {
-	Frameworks            map[string]FrameworkConfig `yaml:"frameworks"`
-	LogInterval           string                      `yaml:"logInterval"`
-	ReconcileInterval     string                      `yaml:"reconcileInterval"`
-	RequireBothProbes     bool                        `yaml:"requireBothProbes"`
-	SkipIfAnyProbeExists  bool                        `yaml:"skipIfAnyProbeExists"`
-	Exclusions            string                      `yaml:"exclusions"`
+	// Master gate - completely enable/disable the controller
+	Enabled bool `yaml:"enabled"`
+
+	// Mode: apply (default), audit (log only), disabled (do nothing)
+	Mode string `yaml:"mode"`
+
+	// Probe injection settings
+	InjectLiveness  bool `yaml:"injectLiveness"`
+	InjectReadiness bool `yaml:"injectReadiness"`
+	InjectStartup   bool `yaml:"injectStartup"`
+
+	// Legacy YAML fields (kept for backwards compatibility)
+	Frameworks           map[string]FrameworkConfig `yaml:"frameworks"`
+	LogInterval          string                     `yaml:"logInterval"`
+	ReconcileInterval    string                     `yaml:"reconcileInterval"`
+	RequireBothProbes    bool                       `yaml:"requireBothProbes"`
+	SkipIfAnyProbeExists bool                       `yaml:"skipIfAnyProbeExists"`
+	Exclusions           string                     `yaml:"exclusions"`
 }
 
 // DefaultFrameworkConfigs returns default framework configurations
@@ -90,6 +109,15 @@ func DefaultFrameworkConfigs() map[string]FrameworkConfig {
 // DefaultJVMConfig returns the default JVM configuration
 func DefaultJVMConfig() JVMConfig {
 	return JVMConfig{
+		// Master gate defaults
+		Enabled: true,
+		Mode:    JVMModeApply,
+
+		// Probe injection defaults (all enabled by default for JVM apps)
+		InjectLiveness:  true,
+		InjectReadiness: true,
+		InjectStartup:   true,
+
 		Frameworks:           DefaultFrameworkConfigs(),
 		LogInterval:          "15m",
 		ReconcileInterval:    "2m",
