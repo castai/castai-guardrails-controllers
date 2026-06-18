@@ -15,7 +15,7 @@ rules:
 - apiGroups: [""]
   resources: ["configmaps"]
   verbs: ["get", "list", "watch"]
-- apiGroups: [""]
+- apiGroups: [""]  # Add this new rule for namespaces
   resources: ["namespaces"]
   verbs: ["get", "list"]
 ---
@@ -37,3 +37,4 @@ kind: ServiceAccount
 metadata:
   name: castai-pdb-controller
   namespace: castai-agent
+

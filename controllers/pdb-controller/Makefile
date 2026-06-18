@@ -1,22 +1,33 @@
-.PHONY: build run clean docker-build docker-push
+# Makefile for building and pushing a multi-arch Docker image using BuildKit
 
-IMAGE_NAME ?= castai-pdb-controller
-IMAGE_TAG ?= latest
+# Variables — align with Helm default (Artifact Registry castai-hub)
+DOCKER_IMAGE_NAME = us-docker.pkg.dev/castai-hub/library/castai-pdb-controller
+DOCKER_IMAGE_TAGS = latest 0.5
+PLATFORMS = linux/amd64,linux/arm64
 
+# Enable BuildKit
+export DOCKER_BUILDKIT = 1
+
+# Default target
+all: build push
+
+# Build the Docker image for multiple architectures
 build:
-	go build -o castai-pdb-controller-bin ./cmd
+	# Check if the multiarch-builder already exists
+	@if ! docker buildx inspect multiarch-builder &>/dev/null; then \
+		docker buildx create --use --name multiarch-builder; \
+	fi
+	docker buildx inspect multiarch-builder --bootstrap
+	docker buildx build \
+		--platform $(PLATFORMS) \
+		$(foreach tag,$(DOCKER_IMAGE_TAGS),-t $(DOCKER_IMAGE_NAME):$(tag)) \
+		--push \
+		.
 
-run: build
-	./castai-pdb-controller-bin
+# Push target is informational (build uses --push to Artifact Registry; authenticate with gcloud/docker first)
+push:
+	@$(foreach tag,$(DOCKER_IMAGE_TAGS),echo "Image: $(DOCKER_IMAGE_NAME):$(tag)";)
 
+# Clean up the buildx builder
 clean:
-	rm -f castai-pdb-controller-bin
-
-docker-build:
-	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
-
-docker-push: docker-build
-	docker push $(IMAGE_NAME):$(IMAGE_TAG)
-
-mod-tidy:
-	go mod tidy
+	-docker buildx rm multiarch-builder || true
