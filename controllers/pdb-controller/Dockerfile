@@ -1,9 +1,8 @@
-FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.24.4-alpine AS builder
 WORKDIR /app
-COPY go.mod ./
-RUN touch go.sum
-COPY cmd/ ./cmd/
-RUN go mod tidy && go mod download
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
 ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /app/castai-pdb-controller-bin ./cmd
@@ -11,4 +10,5 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /app/castai-pdb-
 FROM alpine:3.19
 WORKDIR /app
 COPY --from=builder /app/castai-pdb-controller-bin .
-ENTRYPOINT ["/app/castai-pdb-controller-bin"]
+CMD ["./castai-pdb-controller-bin"]
+

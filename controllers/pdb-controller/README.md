@@ -1,33 +1,51 @@
-# PDB Controller
+## CAST AI PDB Controller
 
-Automatically manages PodDisruptionBudgets (PDBs) for Deployments and StatefulSets.
+A custom Kubernetes controller that automatically manages [PodDisruptionBudgets (PDBs)](https://kubernetes.io/docs/tasks/run-application/configure-pdb/) for Deployments and StatefulSets using flexible, annotation-driven configuration.  
+This controller enables safe, automated disruption management with per-workload overrides and cluster-wide defaults.
 
-## Overview
-
-The PDB Controller watches for Deployments and StatefulSets with 2 or more replicas and automatically creates/maintains PDBs. It prevents node drains from blocking by ensuring workloads have appropriate disruption budgets configured.
+---
 
 ## Features
 
-- **Automatic PDB Creation**: Creates PDBs for Deployments and StatefulSets with ≥2 replicas
-- **Annotation Overrides**: Customize PDB behavior per workload via annotations
-- **Poor PDB Detection**: Detects and optionally fixes overly restrictive PDBs
-- **Multiple PDB Handling**: Removes redundant castai PDBs when user-defined PDBs exist
-- **Garbage Collection**: Removes orphaned PDBs when workloads are deleted
-- **Leader Election**: Multiple replicas with leader election for HA
-- **Exclusion Rules**: Regex-based filtering by namespace, name, and labels
+- **Automatic PDB Creation/Update:**  
+  Ensures every eligible Deployment/StatefulSet has a PDB, using defaults or per-workload overrides.
 
-## Annotations
+- **Annotation-Based Customization:**  
+  Users can set `minAvailable`, `maxUnavailable`, or opt out of PDB management with annotations.
 
-| Annotation | Description | Example |
-|------------|-------------|---------|
-| `workloads.cast.ai/pdb-minAvailable` | Minimum pods available | `"1"` or `"50%"` |
-| `workloads.cast.ai/pdb-maxUnavailable` | Maximum pods unavailable | `"1"` or `"50%"` |
-| `workloads.cast.ai/pdb-unhealthyPodEvictionPolicy` | Eviction policy | `"IfHealthyBudget"` or `"AlwaysAllow"` |
-| `workloads.cast.ai/bypass-default-pdb` | Skip PDB creation | `"true"` |
+- **Dynamic Default Configuration:**  
+    Cluster-wide default PDB values are set via a ConfigMap and can be changed at runtime without redeploying the controller.
 
-## ConfigMap Configuration
+- **Automatic Detection and Handling of Poor PDB Configurations:**  
+  The controller detects overly restrictive or ineffective PodDisruptionBudgets (such as `minAvailable` equal to replicas, `minAvailable: 100%`, or `maxUnavailable: 0/0%`) that could block voluntary disruptions or cause operational issues.
+  
+  Through the `FixPoorPDBs` option in the `castai-pdb-controller-config` ConfigMap, you can choose whether the controller should only warn about these poor configurations (default) or automatically delete and recreate them with safe defaults. This ensures cluster upgrades, node drains, and scaling operations are not blocked by problematic PDBs.
 
-Create a ConfigMap named `castai-pdb-controller-config` in the `castai-agent` namespace:
+- **Live Reconciliation:**  
+  If annotations or ConfigMap values change, existing PDBs are updated automatically to reflect new requirements.
+
+- **Bypass Support:**  
+  Workloads can opt out of automatic PDB management at any time by adding a bypass annotation.
+
+- **Exclusion Rules:**  
+  Configure regex-based exclusion rules to automatically skip PDB creation for specific workloads based on namespace, name, and label patterns. Useful for system workloads, temporary deployments, or critical services.
+
+- **Garbage Collection:**  
+  Orphaned PDBs are cleaned up when workloads are deleted or change state.
+
+- **Leader Election:**  
+  Supports safe, highly available operation in multi-replica controller deployments.
+
+- **Configurable log levels:**  
+  Set `logLevel` in the `castai-pdb-controller-config` ConfigMap to `debug`, `info`, `warn`, or `error` (default `info`) to control how much the controller writes to stderr.
+
+---
+
+## Usage
+
+### 1. **Default Behavior**
+
+If no annotation is set, the controller uses the values from the `castai-pdb-controller-config` ConfigMap:
 
 ```yaml
 apiVersion: v1
@@ -36,90 +54,203 @@ metadata:
   name: castai-pdb-controller-config
   namespace: castai-agent
 data:
-  # Default PDB values (only one can be set)
-  defaultMinAvailable: "1"
-  # defaultMaxUnavailable: "1"
-  
-  # Enable automatic fixing of poor PDBs
-  FixPoorPDBs: "true"
-  
-  # Unhealthy pod eviction policy (Kubernetes 1.26+)
-  defaultUnhealthyPodEvictionPolicy: "IfHealthyBudget"
-  
-  # Log level: debug, info, warn, error
-  logLevel: "info"
-  
-  # Interval settings
-  logInterval: "15m"
-  pdbScanInterval: "2m"
-  garbageCollectInterval: "2m"
-  pdbDumpInterval: "5m"
-  
-  # Exclusion rules (YAML array)
+  minAvailable: "1"
+  logLevel: "info"  # debug | info | warn | error — default info suppresses DEBUG trace lines
+  # maxUnavailable: "50%"  # Optional, use one or the other
+  FixPoorPDBs: "true"  # Set to "true" to auto-fix poor PDBs, "false" to only warn
   exclusions: |
-    - namespaceRegex: "kube-.*"
+    - namespaceRegex: "^kube-system$"
       nameRegex: ""
       labels: {}
     - namespaceRegex: ""
-      nameRegex: "critical-.*"
+      nameRegex: ".*-temp$"
       labels:
-        app: "database"
+        app: "^db-.*"
+        env: "staging|dev"
 ```
 
-## Poor PDB Configuration
+---
 
-The controller detects and can automatically fix overly restrictive PDBs:
+### 2. **Exclusion Rules**
 
-- `minAvailable` equal to replica count
-- `minAvailable` set to `100%`
-- `maxUnavailable` set to `0`
-- `maxUnavailable` set to `0%`
+Configure exclusion rules to automatically skip PDB creation for specific workloads:
 
-Enable auto-fix with `FixPoorPDBs: "true"` in the ConfigMap.
-
-## Building
-
-```bash
-# Build binary
-make build
-
-# Run locally
-make run
-
-# Build Docker image
-make docker-build IMAGE_TAG=latest
-
-# Push Docker image
-make docker-push IMAGE_TAG=latest
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: castai-pdb-controller-config
+  namespace: castai-agent
+data:
+  exclusions: |
+    - namespaceRegex: "^kube-system$"  # Exclude all workloads in kube-system
+      nameRegex: ""
+      labels: {}
+    - namespaceRegex: ""               # Exclude workloads with names ending in -temp
+      nameRegex: ".*-temp$"
+      labels:
+        app: "^db-.*"                  # AND app label starts with db-
+        env: "staging|dev"             # AND env is staging or dev
+    - namespaceRegex: "monitoring"     # Exclude workloads in monitoring namespace
+      nameRegex: ""
+      labels:
+        role: "critical"               # AND role label is critical
 ```
 
-## Deployment
+**Exclusion Rule Logic:**
+- Each rule is evaluated independently
+- If a workload matches ANY rule, no PDB is created
+- Within a single rule, all specified criteria must match (AND logic)
+- Empty strings for `namespaceRegex` or `nameRegex` mean "no filter"
+- Empty object `{}` for `labels` means "no label filter"
+- Regular expressions are supported for flexible matching
 
-1. Apply RBAC:
-```bash
-kubectl apply -f rbac.yaml
+---
+
+### 3. **Per-Workload Annotations**
+
+Add annotations to your Deployment or StatefulSet to override the defaults:
+
+#### **Set minAvailable**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: my-namespace
+  annotations:
+    workloads.cast.ai/pdb-minAvailable: "2"
+spec:
+  replicas: 3
+  # ...
 ```
 
-2. Create ConfigMap (optional):
-```bash
-kubectl apply -f configmap.yaml
+#### **Set maxUnavailable**
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: my-db
+  namespace: my-namespace
+  annotations:
+    workloads.cast.ai/pdb-maxUnavailable: "25%"
+spec:
+  replicas: 4
+  # ...
 ```
 
-3. Deploy controller:
-```bash
-kubectl apply -f deployment.yaml
+#### **Bypass PDB Creation**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: no-pdb-app
+  namespace: my-namespace
+  annotations:
+    workloads.cast.ai/bypass-default-pdb: "true"
+spec:
+  replicas: 5
+  # ...
 ```
 
-## Architecture
+---
 
-The controller uses Kubernetes informers to watch for:
-- Deployments and StatefulSets (create/update/delete)
-- ConfigMap changes for configuration updates
+## Annotation Reference
 
-It runs periodic scans for:
-- Poor PDB configuration detection
-- Multiple PDB detection
-- Orphaned PDB garbage collection
-- PDB dump to file
+| Annotation                                      | Description                                                      | Example Value      |
+|-------------------------------------------------|------------------------------------------------------------------|--------------------|
+| `workloads.cast.ai/pdb-minAvailable`            | Minimum pods that must be available (int or percent, one only)   | `"2"`, `"50%"`     |
+| `workloads.cast.ai/pdb-maxUnavailable`          | Maximum pods that can be unavailable (int or percent, one only)  | `"1"`, `"25%"`     |
+| `workloads.cast.ai/pdb-unhealthyPodEvictionPolicy` | Override PDB `unhealthyPodEvictionPolicy` (Kubernetes 1.26+)   | `AlwaysAllow`, `IfHealthyBudget` |
+| `workloads.cast.ai/bypass-default-pdb`          | Opt out of automatic PDB management                              | `"true"`           |
 
-Leader election ensures only one replica actively manages PDBs at a time.
+---
+
+## How It Works
+
+- **On workload creation or update:**  
+  The controller checks for annotations and creates/updates a PDB accordingly.
+- **On annotation or ConfigMap change:**  
+  The controller reconciles and updates existing PDBs to match new settings.
+- **On workload deletion or bypass:**  
+  The controller deletes the associated PDB.
+- **On ConfigMap update:**  
+  All workloads using the default config are updated to the new values.
+
+---
+
+## Log levels
+
+Verbosity is controlled by the `logLevel` key in the `castai-pdb-controller-config` ConfigMap (no redeploy required). You can also set the `CASTAI_PDB_CONTROLLER_LOG_LEVEL` environment variable on the controller pod **only when** `logLevel` is omitted from the ConfigMap.
+
+| Level | Meaning |
+|-------|---------|
+| **error** | Failures only (API errors, invalid exclusion regexes, failed creates/deletes). |
+| **warn** | Errors plus warnings (invalid durations in the ConfigMap, invalid selectors, poor-PDB / multi-PDB warnings). Hides routine success lines. |
+| **info** | **Default.** Normal operations (PDB create/update/delete, skips, leader messages, config summary). Does not emit `DEBUG:` trace lines. |
+| **debug** | Everything including high-volume `DEBUG:` traces (per-workload exclusion checks, reconciliation steps). Use only while troubleshooting. |
+
+Aliases (case-insensitive): `d`, `i`, `w`, `e`, `warning`, `fatal` (same as `error`). Unknown values fall back to `info` with a warning.
+
+**Helm:** set `config.logLevel` in `values.yaml` (rendered into the ConfigMap).
+
+---
+
+## Requirements
+
+- Kubernetes 1.21+
+- Permissions to manage Deployments, StatefulSets, PDBs, and ConfigMaps in your cluster.
+- RBAC rules that allow listing namespaces and managing PDBs at the cluster scope.
+
+---
+
+## Example: Full Deployment with Controller
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: my-namespace
+  annotations:
+    workloads.cast.ai/pdb-minAvailable: "2"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+        - name: my-app
+          image: my-app:latest
+```
+
+---
+
+## Troubleshooting
+
+- **Duplicate logs:**  
+  Usually caused by log collector configuration, not the controller itself.
+- **No PDB created:**  
+  Ensure your workload has at least 2 replicas and is not opted out with the bypass annotation.
+- **RBAC errors:**  
+  Make sure your controller has permissions to list namespaces and manage PDBs.
+
+---
+
+For advanced usage, deployment via Helm, or troubleshooting, see the [controller source code](./main.go) and your cluster’s RBAC configuration.
+
+If you decide to remove the castai-pdb-controller from your cluster, you need to run the following clean-up command if you'd like all custom-created PDBs to also be deleted.
+
+```yaml
+kubectl get poddisruptionbudget --all-namespaces -o custom-columns="NAMESPACE:.metadata.namespace,NAME:.metadata.name" \
+  | awk '$2 ~ /^castai-.*-pdb$/ {print "kubectl delete poddisruptionbudget -n " $1 " " $2}' \
+  | sh
+```

@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 )
 
+// logSeverity is the severity of a log line. The configured threshold is the least
+// severe level that is emitted; lines with severity below the threshold are dropped.
 type logSeverity int
 
 const (
@@ -16,6 +18,7 @@ const (
 	sevError
 )
 
+// logThreshold stores the minimum severity to print (same scale as logSeverity).
 var logThreshold atomic.Uint32
 
 func init() {
@@ -30,6 +33,7 @@ func shouldLog(msg logSeverity) bool {
 	return msg >= logSeverity(logThreshold.Load())
 }
 
+// parseLogLevelString maps user-facing names to a threshold. Unknown values default to info.
 func parseLogLevelString(s string) logSeverity {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "debug", "d":
@@ -54,6 +58,8 @@ func isKnownLogLevelToken(s string) bool {
 	}
 }
 
+// syncLogLevelFromData applies logLevel from ConfigMap data when set, otherwise
+// CASTAI_PDB_CONTROLLER_LOG_LEVEL, otherwise "info". Call with nil when resetting CM state.
 func syncLogLevelFromData(cmData map[string]string) {
 	var raw string
 	if cmData != nil {

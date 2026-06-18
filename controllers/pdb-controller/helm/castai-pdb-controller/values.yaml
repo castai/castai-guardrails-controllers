@@ -1,106 +1,106 @@
 # Default values for castai-pdb-controller
-# This chart deploys the CAST AI Pod Disruption Budget Controller
-
+# Number of controller replicas to deploy
 replicaCount: 2
 
+# Container image configuration
 image:
-  repository: marcusarenas/castai-pdb-controller
-  tag: "latest"
-  # Official image: us-docker.pkg.dev/castai-hub/library/castai-pdb-controller
-  # (requires GCR authentication, use custom image instead)
+  # GCP Artifact Registry (castai-hub). Use imagePullSecrets on the pod if required for your cluster.
+  repository: us-docker.pkg.dev/castai-hub/library/castai-pdb-controller
+  tag: "0.5"
+  # Container image pull policy
   pullPolicy: IfNotPresent
 
-imagePullSecrets: []
+# Name overrides for the chart
 nameOverride: ""
 fullnameOverride: ""
 
+# ServiceAccount configuration
 serviceAccount:
+  # Create a new service account
   create: true
-  name: ""
+  # Service account name
+  name: "castai-pdb-controller"
+  # Service account annotations (useful for IAM roles, etc.)
   annotations: {}
+
+# RBAC configuration
+rbac:
+  # Create RBAC resources (ClusterRole and ClusterRoleBinding)
+  create: true
 
 # Controller configuration
 config:
-  defaultPDB:
-    minAvailable: 1
-    # maxUnavailable: 1  # Only one can be set (minAvailable or maxUnavailable)
-    unhealthyPodEvictionPolicy: "IfHealthyBudget"
-  enableForkPattern: true
-  detectPoorPDBs: true
-  fixPoorPDBs: true
-  skipSingleReplica: true  # Skip workloads with 1 replica
+  # Default minAvailable for PDBs (use either defaultMinAvailable or defaultMaxUnavailable, not both)
+  # Set to null, "", or omit to disable minAvailable mode
+  # Examples: "1", "50%", null, ""
+  defaultMinAvailable: "1"
+  # Default maxUnavailable for PDBs (use either defaultMinAvailable or defaultMaxUnavailable, not both)
+  # Set to null, "", or omit to disable maxUnavailable mode
+  # Examples: "1", "50%", null, ""
+  defaultMaxUnavailable: null
+  # Automatically fix poor PDB configurations (true/false)
+  FixPoorPDBs: "false"    # Set to "true" for automatic correction, "false" for logging only
+  # Log interval for repeated messages (e.g., "15m", "1h")
   logInterval: "15m"
+  # PDB scan interval (e.g., "2m", "5m")
   pdbScanInterval: "2m"
+  # Garbage collection interval (e.g., "2m", "5m")
   garbageCollectInterval: "2m"
-  exclusions: []
+  # PDB dump interval (e.g., "5m", "10m")
+  pdbDumpInterval: "5m"
+  # Application log level: debug, info, warn (or warning), error
+  logLevel: "info"
+  # PodDisruptionBudget unhealthyPodEvictionPolicy (Kubernetes 1.26+). IfHealthyBudget | AlwaysAllow | "" (omit)
+  defaultUnhealthyPodEvictionPolicy: ""
+  # Exclusion rules for workloads to skip PDB creation
+  # Each rule is evaluated independently; if a workload matches ANY rule, no PDB is created
+  # Within a single rule, all specified criteria (namespaceRegex, nameRegex, labels) must match (AND logic)
+  # Regular expression patterns are used for flexible matching
+  # Empty strings for namespaceRegex or nameRegex, or empty object {} for labels, mean "no filter" for that criterion
+  exclusions:
+    - nameRegex: .*-temp$
+      namespaceRegex: ""
+      labels: {}
 
-podAnnotations: {}
-podLabels: {}
+# Resource configuration
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
 
-podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 65534
-  fsGroup: 65534
-
+# Security context configuration
 securityContext:
-  allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
-  capabilities:
-    drop:
+  # Container security context
+  container:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    runAsUser: 1000
+    capabilities:
+      drop:
       - ALL
+  # Pod security context
+  pod:
+    fsGroup: 1000
+    runAsNonRoot: true
+    runAsUser: 1000
 
-resources: {}
-  # We usually recommend not to specify default resources and to leave this as a conscious
-  # choice for the user. This also increases chances charts run on environments with little
-  # resources, such as Minikube. If you do want to specify resources, uncomment the following
-  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
-  # limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  # requests:
-  #   cpu: 100m
-  #   memory: 128Mi
+# Pod configuration
+pod:
+  # Pod annotations
+  annotations: {}
+  # Node selector for pod assignment
+  nodeSelector: {}
+  # Tolerations for pod assignment
+  tolerations: []
+  # Affinity for pod assignment
+  affinity: {}
 
-nodeSelector: {}
-
-tolerations: []
-
-affinity:
-  podAntiAffinity:
-    preferredDuringSchedulingIgnoredDuringExecution:
-      - weight: 100
-        podAffinityTerm:
-          labelSelector:
-            matchLabels:
-              app.kubernetes.io/name: castai-pdb-controller
-          topologyKey: kubernetes.io/hostname
-
-service:
-  enabled: false
-  type: ClusterIP
-  port: 8080
-
-metrics:
-  enabled: false
-  serviceMonitor:
-    enabled: false
-    interval: 30s
-    scrapeTimeout: 10s
-
-rbac:
-  create: true
-
-# Pod disruption budget for the controller
-podDisruptionBudget:
-  enabled: true
-  minAvailable: 1
-
-# Priority class for the controller pods
-priorityClassName: ""
-
-# Update strategy for the deployment
-updateStrategy:
+# Deployment strategy
+strategy:
   type: RollingUpdate
   rollingUpdate:
-    maxSurge: 1
-    maxUnavailable: 0
+    maxSurge: 25%
+    maxUnavailable: 25% 
