@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -17,10 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -57,6 +53,7 @@ type Config struct {
 	LogInterval            string              `json:"logInterval"`
 	ReconcileInterval      string              `json:"reconcileInterval"`
 	GarbageCollectInterval string              `json:"garbageCollectInterval"`
+	LogLevel               string              `json:"logLevel"`
 	Exclusions             []ExclusionRule     `json:"exclusions"`
 }
 
@@ -300,12 +297,17 @@ func loadConfig(clientset kubernetes.Interface) {
 	if val, ok := cm.Data["garbageCollectInterval"]; ok {
 		currentConfig.GarbageCollectInterval = val
 	}
+	if val, ok := cm.Data["logLevel"]; ok {
+		currentConfig.LogLevel = val
+	}
 
 	logInfo("Loaded config: %d constraints, skipSingleReplica=%v", 
 		len(currentConfig.DefaultConstraints), currentConfig.SkipSingleReplica)
 }
 
 func handleWorkload(ctx context.Context, clientset kubernetes.Interface, recorder record.EventRecorder, namespace, name, kind string) {
+	// Note: clientset may be nil when called from enqueueAllWorkloads during periodic reconciliation.
+	// In that case, skip processing since the informer cache doesn't have the object.
 	if clientset == nil {
 		return
 	}
@@ -361,12 +363,18 @@ func isAnnotationSet(clientset kubernetes.Interface, namespace, name, kind strin
 	case "Deployment":
 		d, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
+			if !errors.IsNotFound(err) {
+				logError("Failed to get deployment %s/%s: %v", namespace, name, err)
+			}
 			return false
 		}
 		val = d.Annotations[annotation]
 	case "StatefulSet":
 		ss, err := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
+			if !errors.IsNotFound(err) {
+				logError("Failed to get statefulset %s/%s: %v", namespace, name, err)
+			}
 			return false
 		}
 		val = ss.Annotations[annotation]
