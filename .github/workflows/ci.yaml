@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'controllers/**'
+      - '.github/workflows/**'
+
+jobs:
+  pdb-controller:
+    name: pdb-controller
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: controllers/pdb-controller
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: controllers/pdb-controller/go.sum
+
+      - name: Lint
+        continue-on-error: true
+        uses: golangci/golangci-lint-action@v7
+        with:
+          working-directory: controllers/pdb-controller
+          version: v2.12
+          args: --timeout=5m
+
+      - name: Test
+        run: go test ./...
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker build check
+        uses: docker/build-push-action@v6
+        with:
+          context: controllers/pdb-controller
+          push: false
+          load: true
+          platforms: linux/amd64
+
+  tsc-controller:
+    name: tsc-controller
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: controllers/tsc-controller
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: controllers/tsc-controller/go.sum
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v7
+        continue-on-error: true
+        with:
+          working-directory: controllers/tsc-controller
+          version: v2.12
+          args: --timeout=5m
+
+      - name: Test
+        continue-on-error: true
+        run: go test ./...
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker build check
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: controllers/tsc-controller
+          push: false
+          load: true
+          platforms: linux/amd64
+
+  jvm-probe-controller:
+    name: jvm-probe-controller
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: controllers/jvm-probe-controller
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: controllers/jvm-probe-controller/go.sum
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v7
+        continue-on-error: true
+        with:
+          working-directory: controllers/jvm-probe-controller
+          version: v2.12
+          args: --timeout=5m
+
+      - name: Test
+        run: go test ./...
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker build check
+        uses: docker/build-push-action@v6
+        with:
+          context: controllers/jvm-probe-controller
+          push: false
+          load: true
+          platforms: linux/amd64
