@@ -173,7 +173,7 @@ func runController(ctx context.Context, clientset kubernetes.Interface, recorder
 			cm := newObj.(*corev1.ConfigMap)
 			if cm.Name == configMapName && cm.Namespace == configNamespace {
 				loadConfig(clientset)
-				enqueueAllWorkloads(deployInformer, ssInformer)
+				enqueueAllWorkloads(clientset, deployInformer, ssInformer)
 			}
 		},
 	})
@@ -215,22 +215,22 @@ func runController(ctx context.Context, clientset kubernetes.Interface, recorder
 		case <-stopCh:
 			return
 		case <-reconcileTicker.C:
-			enqueueAllWorkloads(deployInformer, ssInformer)
+			enqueueAllWorkloads(clientset, deployInformer, ssInformer)
 		}
 	}
 }
 
-func enqueueAllWorkloads(deployInformer cache.SharedIndexInformer, ssInformer cache.SharedIndexInformer) {
+func enqueueAllWorkloads(clientset kubernetes.Interface, deployInformer cache.SharedIndexInformer, ssInformer cache.SharedIndexInformer) {
 	objs, _ := deployInformer.GetIndexer().List()
 	for _, obj := range objs {
 		d := obj.(*appsv1.Deployment)
-		handleWorkload(context.Background(), nil, nil, d.Namespace, d.Name, "Deployment")
+		handleWorkload(context.Background(), clientset, recorder, d.Namespace, d.Name, "Deployment")
 	}
 
 	objs, _ = ssInformer.GetIndexer().List()
 	for _, obj := range objs {
 		ss := obj.(*appsv1.StatefulSet)
-		handleWorkload(context.Background(), nil, nil, ss.Namespace, ss.Name, "StatefulSet")
+		handleWorkload(context.Background(), clientset, recorder, ss.Namespace, ss.Name, "StatefulSet")
 	}
 }
 
@@ -306,8 +306,6 @@ func loadConfig(clientset kubernetes.Interface) {
 }
 
 func handleWorkload(ctx context.Context, clientset kubernetes.Interface, recorder record.EventRecorder, namespace, name, kind string) {
-	// Note: clientset may be nil when called from enqueueAllWorkloads during periodic reconciliation.
-	// In that case, skip processing since the informer cache doesn't have the object.
 	if clientset == nil {
 		return
 	}
