@@ -1,0 +1,43 @@
+name: Release TSC Controller
+
+on:
+  push:
+    tags:
+      - 'tsc-v*'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#*-v}" >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: prepare
+    uses: ./.github/workflows/_release-image.yaml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      image_name: castai-tsc-controller
+      context: controllers/tsc-controller
+      version: ${{ needs.prepare.outputs.version }}
+    secrets:
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT_EMAIL: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+  helm:
+    needs: prepare
+    uses: ./.github/workflows/_release-helm.yaml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    with:
+      chart_name: castai-tsc-controller
+      chart_path: controllers/tsc-controller/helm/castai-tsc-controller
+      version: ${{ needs.prepare.outputs.version }}
+      helm_repo_url: https://castai.github.io/castai-guardrails-controllers
