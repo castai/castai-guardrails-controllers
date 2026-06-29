@@ -6,7 +6,7 @@ replicaCount: 2
 image:
   # GCP Artifact Registry (castai-hub). Use imagePullSecrets on the pod if required for your cluster.
   repository: us-docker.pkg.dev/castai-hub/library/castai-tsc-controller
-  tag: "v1.0.0"
+  tag: "0.0.2"
   # Container image pull policy
   pullPolicy: IfNotPresent
 
