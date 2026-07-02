@@ -81,5 +81,9 @@ Generate constraints JSON
 */}}
 {{- define "castai-tsc-controller.constraintsJson" -}}
 {{- $c := .Values.config.defaultConstraints -}}
+{{- if eq (kindOf $c) "slice" -}}
+{{- $c | toJson }}
+{{- else -}}
 [{"maxSkew": {{ $c.maxSkew }}, "topologyKey": "{{ $c.topologyKey }}", "whenUnsatisfiable": "{{ $c.whenUnsatisfiable }}"}]
+{{- end }}
 {{- end }}
