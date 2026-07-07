@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -250,6 +251,25 @@ func parseConfigMap(cm *corev1.ConfigMap) *JVMConfig {
 		cfg.Exclusions = val
 	}
 
+	// P1: Liveness probe injection control
+	if val, ok := cm.Data["jvm-injectLivenessProbe"]; ok {
+		cfg.InjectLivenessProbe = val == "true"
+	}
+	if val, ok := cm.Data["jvm-injectReadinessProbe"]; ok {
+		cfg.InjectReadinessProbe = val == "true"
+	}
+	if val, ok := cm.Data["jvm-injectStartupProbe"]; ok {
+		cfg.InjectStartupProbe = val == "true"
+	}
+
+	// P2: Dry-run mode
+	if val, ok := cm.Data["jvm-dryRun"]; ok {
+		cfg.DryRun = val == "true"
+	}
+	if val, ok := cm.Data["jvm-logIntendedChanges"]; ok {
+		cfg.LogIntendedChanges = val == "true"
+	}
+
 	return &cfg
 }
 
@@ -421,6 +441,7 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 	// Process each container
 	modified := false
 	var allPatches []map[string]interface{}
+	var intendedActions []string
 
 	for i, container := range spec.Containers {
 		// Detect JVM
@@ -435,17 +456,25 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 			framework = frameworkOverride
 		}
 
-		// Check if probes should be overwritten or needs initial injection
-		hasLiveness := container.LivenessProbe != nil
-		hasReadiness := container.ReadinessProbe != nil
-		hasStartup := container.StartupProbe != nil
+		// P2: Use new NeedsProbes that returns three separate bools
+		needsLiveness, needsReadiness, needsStartup := NeedsProbes(container, cfg.RequireBothProbes)
 
-		// Determine which probes need injection
-		needsLiveness := (!hasLiveness || overwriteLiveness) && (overwriteLiveness || !cfg.SkipIfAnyProbeExists)
-		needsReadiness := (!hasReadiness || overwriteReadiness) && (overwriteReadiness || !cfg.SkipIfAnyProbeExists)
-		// ALWAYS inject startup probe if missing - it's critical for JVM apps
-		// This prevents pods being killed during long startup times
-		needsStartup := !hasStartup || overwriteStartup
+		// Apply overwrite logic per-probe
+		if overwriteLiveness || (!cfg.SkipIfAnyProbeExists && needsLiveness) {
+			needsLiveness = true
+		} else {
+			needsLiveness = false
+		}
+		if overwriteReadiness || (!cfg.SkipIfAnyProbeExists && needsReadiness) {
+			needsReadiness = true
+		} else {
+			needsReadiness = false
+		}
+		if overwriteStartup || needsStartup {
+			needsStartup = true
+		} else {
+			needsStartup = false
+		}
 
 		if !needsLiveness && !needsReadiness && !needsStartup {
 			logInfo("skip", "Container %s in %s already has all probes configured", container.Name, nn)
@@ -453,11 +482,11 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 		}
 
 		// Check for poor probe configurations that should be fixed
-		if hasLiveness && !needsLiveness && isPoorProbeConfig(container.LivenessProbe) {
+		if container.LivenessProbe != nil && !needsLiveness && isPoorProbeConfig(container.LivenessProbe) {
 			logWarn("poor-liveness", "Container %s in %s has poorly configured liveness probe", container.Name, nn)
 			needsLiveness = true
 		}
-		if hasReadiness && !needsReadiness && isPoorProbeConfig(container.ReadinessProbe) {
+		if container.ReadinessProbe != nil && !needsReadiness && isPoorProbeConfig(container.ReadinessProbe) {
 			logWarn("poor-readiness", "Container %s in %s has poorly configured readiness probe", container.Name, nn)
 			needsReadiness = true
 		}
@@ -469,13 +498,15 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 		var containerPatches []map[string]interface{}
 
 		if needsLiveness && liveness != nil {
-			if hasLiveness {
+			if container.LivenessProbe != nil {
 				// Replace existing
 				containerPatches = append(containerPatches, map[string]interface{}{
 					"op":    "replace",
 					"path":  fmt.Sprintf("/spec/template/spec/containers/%d/livenessProbe", i),
 					"value": liveness,
 				})
+				intendedActions = append(intendedActions, 
+					fmt.Sprintf("replace liveness probe for container %s", container.Name))
 			} else {
 				// Add new
 				containerPatches = append(containerPatches, map[string]interface{}{
@@ -483,39 +514,49 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 					"path":  fmt.Sprintf("/spec/template/spec/containers/%d/livenessProbe", i),
 					"value": liveness,
 				})
+				intendedActions = append(intendedActions,
+					fmt.Sprintf("add liveness probe for container %s", container.Name))
 			}
 		}
 
 		if needsReadiness && readiness != nil {
-			if hasReadiness {
+			if container.ReadinessProbe != nil {
 				containerPatches = append(containerPatches, map[string]interface{}{
 					"op":    "replace",
 					"path":  fmt.Sprintf("/spec/template/spec/containers/%d/readinessProbe", i),
 					"value": readiness,
 				})
+				intendedActions = append(intendedActions,
+					fmt.Sprintf("replace readiness probe for container %s", container.Name))
 			} else {
 				containerPatches = append(containerPatches, map[string]interface{}{
 					"op":    "add",
 					"path":  fmt.Sprintf("/spec/template/spec/containers/%d/readinessProbe", i),
 					"value": readiness,
 				})
+				intendedActions = append(intendedActions,
+					fmt.Sprintf("add readiness probe for container %s", container.Name))
 			}
 		}
 
 		// Always add startup probe for JVM containers - critical for slow-starting apps
 		if needsStartup && startup != nil {
-			if hasStartup {
+			if container.StartupProbe != nil {
 				containerPatches = append(containerPatches, map[string]interface{}{
 					"op":    "replace",
 					"path":  fmt.Sprintf("/spec/template/spec/containers/%d/startupProbe", i),
 					"value": startup,
 				})
+				intendedActions = append(intendedActions,
+					fmt.Sprintf("replace startup probe for container %s", container.Name))
 			} else {
 				containerPatches = append(containerPatches, map[string]interface{}{
 					"op":    "add",
 					"path":  fmt.Sprintf("/spec/template/spec/containers/%d/startupProbe", i),
 					"value": startup,
 				})
+				intendedActions = append(intendedActions,
+					fmt.Sprintf("add startup probe for container %s", container.Name))
 			}
 			logInfo("startup-inject", "Injecting startup probe for container %s (JVM apps need this for slow startup)", container.Name)
 		}
@@ -528,12 +569,24 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 		allPatches = append(allPatches, containerPatches...)
 		modified = true
 
-		logInfo("inject", "Injecting/probing probes into container %s (framework: %s, liveness:%v, readiness:%v, startup:%v)", 
+		logInfo("inject", "Injecting probes into container %s (framework: %s, liveness:%v, readiness:%v, startup:%v)", 
 			container.Name, framework, needsLiveness, needsReadiness, needsStartup)
 	}
 
 	if !modified {
 		logDebug("skip", "No probes needed for workload %s", nn)
+		workloadsLock.Lock()
+		workloadsProcessed[nn] = true
+		workloadsLock.Unlock()
+		return nil
+	}
+
+	// P2: Dry-run mode - log intended changes but don't apply
+	if cfg.DryRun {
+		if cfg.LogIntendedChanges && len(intendedActions) > 0 {
+			logAlways("DRY-RUN: Would apply %d patches to %s: %s", 
+				len(allPatches), nn, strings.Join(intendedActions, "; "))
+		}
 		workloadsLock.Lock()
 		workloadsProcessed[nn] = true
 		workloadsLock.Unlock()

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -10,11 +11,13 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+
+	appv1 "k8s.io/api/apps/v1"
 )
 
 // PodEventMonitor tracks probe failures and schedules fixes
@@ -366,12 +369,49 @@ func (p *PodEventMonitor) processFixQueue(ctx context.Context) {
 }
 
 // applyFix applies a probe fix to the workload
+// P0: Framework-aware fix - uses BuildProbesForFramework with detected framework/port
+// P0: Timing-only patches - preserves existing handler
 func (p *PodEventMonitor) applyFix(ctx context.Context, req FixRequest) {
-	// Calculate new probe settings based on failure pattern
-	fix := p.calculateProbeFix(req)
+	// Get workload to detect framework and port
+	workload, err := p.getWorkload(ctx, req.WorkloadNamespace, req.WorkloadName, req.WorkloadKind)
+	if err != nil {
+		logError("fix-failed", "Failed to get workload for fix: %v", err)
+		return
+	}
 
-	// Apply the patch
-	err := p.patchWorkloadProbes(ctx, req, fix)
+	// Find container and detect framework/port
+	containerInfo := p.detectContainerInfo(workload, req.ContainerName)
+
+	// Calculate timing adjustments based on failure pattern
+	timingFix := p.calculateProbeFix(req)
+
+	// Get current config for probe building
+	configLock.RLock()
+	cfg := config
+	configLock.RUnlock()
+
+	// Build framework-aware probes with calculated timing
+	liveness, readiness, startup := BuildProbesForFramework(
+		containerInfo.Framework,
+		containerInfo,
+		map[string]string{}, // No annotation overrides for auto-fix
+		cfg,
+	)
+
+	// Apply timing adjustments to built probes
+	p.applyTimingToProbe(liveness, timingFix)
+	p.applyTimingToProbe(readiness, timingFix)
+	p.applyTimingToProbe(startup, timingFix)
+
+	// P2: Dry-run check
+	if cfg != nil && cfg.DryRun {
+		logAlways("DRY-RUN: Would apply probe fix for %s/%s container=%s probe=%s",
+			req.WorkloadNamespace, req.WorkloadName, req.ContainerName, req.ProbeType)
+		return
+	}
+
+	// Patch using framework-aware probes (timing-only if probe exists)
+	err = p.patchWorkloadProbesFrameworkAware(ctx, req, liveness, readiness, startup)
 	if err != nil {
 		logError("fix-failed", "Failed to apply probe fix for %s: %v", req.WorkloadKey, err)
 		return
@@ -382,7 +422,7 @@ func (p *PodEventMonitor) applyFix(ctx context.Context, req FixRequest) {
 	key := fmt.Sprintf("%s/%s/%s/%s", req.WorkloadNamespace, req.WorkloadName, req.ContainerName, req.ProbeType)
 	p.permanentFailures[key] = &PermanentFailureRecord{
 		FixedAt:     time.Now(),
-		FixApplied:  fix,
+		FixApplied:  timingFix,
 		FailureRate: float64(req.FailureInfo.FailureCount) / time.Since(req.FailureInfo.FirstFailure).Minutes(),
 	}
 	p.pfLock.Unlock()
@@ -394,14 +434,16 @@ func (p *PodEventMonitor) applyFix(ctx context.Context, req FixRequest) {
 	logAlways("║ Workload: %s/%s", req.WorkloadNamespace, req.WorkloadName)
 	logAlways("║ Container: %s", req.ContainerName)
 	logAlways("║ Probe Type: %s", req.ProbeType)
-	logAlways("║ Reason: %s", fix.Reason)
+	logAlways("║ Framework: %s", containerInfo.Framework)
+	logAlways("║ Port: %d", containerInfo.Port)
+	logAlways("║ Reason: %s", timingFix.Reason)
 	logAlways("║ Changes:")
-	logAlways("║   InitialDelay: %d → %d seconds", req.CurrentDelay, fix.NewInitialDelaySeconds)
-	logAlways("║   FailureThreshold: %d → %d", req.CurrentThreshold, fix.NewFailureThreshold)
+	logAlways("║   InitialDelay: %d → %d seconds", req.CurrentDelay, timingFix.NewInitialDelaySeconds)
+	logAlways("║   FailureThreshold: %d → %d", req.CurrentThreshold, timingFix.NewFailureThreshold)
 	logAlways("╚════════════════════════════════════════════════════════════════╝")
 
 	// Emit Kubernetes event
-	p.emitFixEvent(ctx, req, fix)
+	p.emitFixEvent(ctx, req, timingFix)
 }
 
 // calculateProbeFix calculates the new probe settings based on failure pattern
@@ -459,120 +501,166 @@ func (p *PodEventMonitor) calculateProbeFix(req FixRequest) ProbeFix {
 	return fix
 }
 
-// patchWorkloadProbes applies a JSON patch to fix probe settings
-func (p *PodEventMonitor) patchWorkloadProbes(ctx context.Context, req FixRequest, fix ProbeFix) error {
-	// Create patch operations
+// getWorkload retrieves Deployment or StatefulSet
+func (p *PodEventMonitor) getWorkload(ctx context.Context, namespace, name, kind string) (runtime.Object, error) {
+	switch kind {
+	case "Deployment":
+		return p.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	case "StatefulSet":
+		return p.clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+	}
+	return nil, fmt.Errorf("unsupported kind: %s", kind)
+}
+
+// detectContainerInfo finds container and runs JVM detection
+func (p *PodEventMonitor) detectContainerInfo(workload runtime.Object, containerName string) ContainerInfo {
+	var spec *corev1.PodSpec
+	switch w := workload.(type) {
+	case *appv1.Deployment:
+		spec = &w.Spec.Template.Spec
+	case *appv1.StatefulSet:
+		spec = &w.Spec.Template.Spec
+	}
+	if spec == nil {
+		return ContainerInfo{Name: containerName, Port: 8080, Framework: FrameworkGeneric}
+	}
+	for _, c := range spec.Containers {
+		if c.Name == containerName {
+			return DetectJVMContainer(c)
+		}
+	}
+	return ContainerInfo{Name: containerName, Port: 8080, Framework: FrameworkGeneric}
+}
+
+// applyTimingToProbe applies calculated timing to an existing probe
+func (p *PodEventMonitor) applyTimingToProbe(probe *corev1.Probe, fix ProbeFix) {
+	if probe == nil {
+		return
+	}
+	probe.InitialDelaySeconds = fix.NewInitialDelaySeconds
+	probe.FailureThreshold = fix.NewFailureThreshold
+	probe.TimeoutSeconds = fix.NewTimeoutSeconds
+	probe.PeriodSeconds = fix.NewPeriodSeconds
+}
+
+// patchWorkloadProbesFrameworkAware patches probes using framework-aware probe objects
+// P0: PATCHES ONLY TIMING FIELDS if probe exists; ADDS full probe if missing
+func (p *PodEventMonitor) patchWorkloadProbesFrameworkAware(ctx context.Context, req FixRequest, liveness, readiness, startup *corev1.Probe) error {
 	patches := make([]map[string]interface{}, 0)
 
-	probePath := fmt.Sprintf("/spec/template/spec/containers/")
-	if req.WorkloadKind == "Deployment" || req.WorkloadKind == "StatefulSet" {
-		// Need to find container index
-		var containerIndex int
-		var err error
-		containerIndex, err = p.findContainerIndex(ctx, req.WorkloadNamespace, req.WorkloadName, req.WorkloadKind, req.ContainerName)
-		if err != nil {
-			return err
-		}
-		probePath = fmt.Sprintf("%s%d/", probePath, containerIndex)
+	containerIndex, err := p.findContainerIndex(ctx, req.WorkloadNamespace, req.WorkloadName, req.WorkloadKind, req.ContainerName)
+	if err != nil {
+		return err
 	}
 
-	// Build probe patch based on probe type
-	probeJSON := map[string]interface{}{
-		"initialDelaySeconds": fix.NewInitialDelaySeconds,
-		"periodSeconds":       fix.NewPeriodSeconds,
-		"timeoutSeconds":      fix.NewTimeoutSeconds,
-		"failureThreshold":    fix.NewFailureThreshold,
-		"successThreshold":    1,
-	}
+	basePath := fmt.Sprintf("/spec/template/spec/containers/%d", containerIndex)
 
-	switch req.ProbeType {
-	case "liveness":
-		probePath += "livenessProbe"
-		if req.CurrentDelay == 0 {
-			// Add complete probe if doesn't exist
-			probeJSON["httpGet"] = map[string]interface{}{
-				"path": "/actuator/health/liveness",
-				"port": 8080,
-			}
-			patches = append(patches, map[string]interface{}{
-				"op":    "add",
-				"path":  probePath,
-				"value": probeJSON,
-			})
-		} else {
-			// Replace existing probe
-			patches = append(patches, map[string]interface{}{
-				"op":    "replace",
-				"path":  probePath,
-				"value": probeJSON,
-			})
+	// For each probe type: if exists -> patch timing only; if missing -> add full probe
+	for probeType, probe := range map[string]*corev1.Probe{
+		"livenessProbe":   liveness,
+		"readinessProbe":  readiness,
+		"startupProbe":    startup,
+	} {
+		if probe == nil {
+			continue
 		}
-	case "readiness":
-		probePath += "readinessProbe"
-		if req.CurrentDelay == 0 {
-			probeJSON["httpGet"] = map[string]interface{}{
-				"path": "/actuator/health/readiness",
-				"port": 8080,
-			}
+
+		probePath := fmt.Sprintf("%s/%s", basePath, probeType)
+		hasExisting := p.probeExists(ctx, req, probeType)
+
+		if hasExisting {
+			// P0: PATCH ONLY TIMING FIELDS - preserve handler
+			patches = append(patches, p.buildTimingPatch(probePath, probe)...)
+		} else {
+			// ADD full probe (first injection)
 			patches = append(patches, map[string]interface{}{
 				"op":    "add",
 				"path":  probePath,
-				"value": probeJSON,
-			})
-		} else {
-			patches = append(patches, map[string]interface{}{
-				"op":    "replace",
-				"path":  probePath,
-				"value": probeJSON,
-			})
-		}
-	case "startup":
-		probePath += "startupProbe"
-		// Always add startup probe if fixing
-		if req.CurrentDelay == 0 {
-			probeJSON["httpGet"] = map[string]interface{}{
-				"path": "/actuator/health",
-				"port": 8080,
-			}
-			patches = append(patches, map[string]interface{}{
-				"op":    "add",
-				"path":  probePath,
-				"value": probeJSON,
-			})
-		} else {
-			patches = append(patches, map[string]interface{}{
-				"op":    "replace",
-				"path":  probePath,
-				"value": probeJSON,
+				"value": probe,
 			})
 		}
 	}
 
 	if len(patches) == 0 {
-		return fmt.Errorf("no patches to apply")
+		return nil // Nothing to patch
 	}
 
-	// Apply patches
+	return p.applyPatches(ctx, req.WorkloadKind, req.WorkloadNamespace, req.WorkloadName, patches)
+}
+
+// buildTimingPatch creates JSON patches for only timing fields
+func (p *PodEventMonitor) buildTimingPatch(basePath string, probe *corev1.Probe) []map[string]interface{} {
+	return []map[string]interface{}{
+		{"op": "replace", "path": basePath + "/initialDelaySeconds", "value": probe.InitialDelaySeconds},
+		{"op": "replace", "path": basePath + "/periodSeconds", "value": probe.PeriodSeconds},
+		{"op": "replace", "path": basePath + "/timeoutSeconds", "value": probe.TimeoutSeconds},
+		{"op": "replace", "path": basePath + "/failureThreshold", "value": probe.FailureThreshold},
+		{"op": "replace", "path": basePath + "/successThreshold", "value": probe.SuccessThreshold},
+	}
+}
+
+// probeExists checks if a probe already exists on the container
+func (p *PodEventMonitor) probeExists(ctx context.Context, req FixRequest, probeType string) bool {
+	workload, err := p.getWorkload(ctx, req.WorkloadNamespace, req.WorkloadName, req.WorkloadKind)
+	if err != nil {
+		return false
+	}
+
+	var spec *corev1.PodSpec
+	switch w := workload.(type) {
+	case *appv1.Deployment:
+		spec = &w.Spec.Template.Spec
+	case *appv1.StatefulSet:
+		spec = &w.Spec.Template.Spec
+	}
+	if spec == nil {
+		return false
+	}
+
+	containerIndex, err := p.findContainerIndex(ctx, req.WorkloadNamespace, req.WorkloadName, req.WorkloadKind, req.ContainerName)
+	if err != nil || containerIndex >= len(spec.Containers) {
+		return false
+	}
+
+	c := spec.Containers[containerIndex]
+	switch probeType {
+	case "livenessProbe":
+		return c.LivenessProbe != nil
+	case "readinessProbe":
+		return c.ReadinessProbe != nil
+	case "startupProbe":
+		return c.StartupProbe != nil
+	}
+	return false
+}
+
+// applyPatches applies JSON patches to a workload
+func (p *PodEventMonitor) applyPatches(ctx context.Context, kind, namespace, name string, patches []map[string]interface{}) error {
 	patchBytes, err := json.Marshal(patches)
 	if err != nil {
 		return fmt.Errorf("failed to marshal patch: %v", err)
 	}
 
-	var patchErr error
-	switch req.WorkloadKind {
+	switch kind {
 	case "Deployment":
-		_, patchErr = p.clientset.AppsV1().Deployments(req.WorkloadNamespace).Patch(
-			ctx, req.WorkloadName, types.JSONPatchType, patchBytes, metav1.PatchOptions{},
+		_, err = p.clientset.AppsV1().Deployments(namespace).Patch(
+			ctx, name, types.JSONPatchType, patchBytes, metav1.PatchOptions{},
 		)
 	case "StatefulSet":
-		_, patchErr = p.clientset.AppsV1().StatefulSets(req.WorkloadNamespace).Patch(
-			ctx, req.WorkloadName, types.JSONPatchType, patchBytes, metav1.PatchOptions{},
+		_, err = p.clientset.AppsV1().StatefulSets(namespace).Patch(
+			ctx, name, types.JSONPatchType, patchBytes, metav1.PatchOptions{},
 		)
 	default:
-		return fmt.Errorf("unsupported workload kind: %s", req.WorkloadKind)
+		return fmt.Errorf("unsupported workload kind: %s", kind)
 	}
 
-	return patchErr
+	return err
+}
+
+// DEPRECATED: Old patchWorkloadProbes - kept for reference but not used
+// The new framework-aware version is patchWorkloadProbesFrameworkAware
+func (p *PodEventMonitor) patchWorkloadProbes(ctx context.Context, req FixRequest, fix ProbeFix) error {
+	return fmt.Errorf("deprecated - use patchWorkloadProbesFrameworkAware")
 }
 
 // findContainerIndex finds the index of a container in the workload

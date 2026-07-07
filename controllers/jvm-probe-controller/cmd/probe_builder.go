@@ -31,6 +31,15 @@ type JVMConfig struct {
 	RequireBothProbes     bool                        `yaml:"requireBothProbes"`
 	SkipIfAnyProbeExists  bool                        `yaml:"skipIfAnyProbeExists"`
 	Exclusions            string                      `yaml:"exclusions"`
+
+	// P1: Liveness probe safety - opt-in by default
+	InjectLivenessProbe   bool                        `yaml:"injectLivenessProbe"`
+	InjectReadinessProbe  bool                        `yaml:"injectReadinessProbe"`
+	InjectStartupProbe    bool                        `yaml:"injectStartupProbe"`
+
+	// P2: Dry-run / observe-only mode
+	DryRun                bool                        `yaml:"dryRun"`
+	LogIntendedChanges    bool                        `yaml:"logIntendedChanges"`
 }
 
 // DefaultFrameworkConfigs returns default framework configurations
@@ -90,11 +99,18 @@ func DefaultFrameworkConfigs() map[string]FrameworkConfig {
 // DefaultJVMConfig returns the default JVM configuration
 func DefaultJVMConfig() JVMConfig {
 	return JVMConfig{
-		Frameworks:           DefaultFrameworkConfigs(),
-		LogInterval:          "15m",
-		ReconcileInterval:    "2m",
-		RequireBothProbes:    true,
-		SkipIfAnyProbeExists: false,
+		Frameworks:             DefaultFrameworkConfigs(),
+		LogInterval:            "15m",
+		ReconcileInterval:      "2m",
+		RequireBothProbes:      true,
+		SkipIfAnyProbeExists:   false,
+		// P1: Liveness opt-in (safer default)
+		InjectLivenessProbe:    false,
+		InjectReadinessProbe:   true,
+		InjectStartupProbe:     true,
+		// P2: Dry-run mode (safer default)
+		DryRun:                 true,
+		LogIntendedChanges:     true,
 	}
 }
 
@@ -125,25 +141,36 @@ func BuildProbesForFramework(framework string, containerInfo ContainerInfo, anno
 	readinessPath := getAnnotation(annotations, AnnotationJVMProbeReadinessPath, frameworkConfig.ReadinessPath)
 	startupPath := getAnnotation(annotations, AnnotationJVMProbeStartupPath, frameworkConfig.StartupPath)
 
-	// Build liveness probe
-	if useTCP {
-		liveness = buildTCPProbe(port, initialDelay, period, timeout, failureThreshold)
-	} else if livenessPath != "" {
-		liveness = buildHTTPGetProbe(port, livenessPath, initialDelay, period, timeout, failureThreshold, successThreshold)
+	// P1: Check config flags for probe injection (opt-in liveness, opt-out readiness/startup)
+	injectLiveness := getAnnotationBool(annotations, AnnotationJVMInjectLiveness, config.InjectLivenessProbe)
+	injectReadiness := getAnnotationBool(annotations, AnnotationJVMInjectReadiness, config.InjectReadinessProbe)
+	injectStartup := getAnnotationBool(annotations, AnnotationJVMInjectStartup, config.InjectStartupProbe)
+
+	// Build liveness probe (only if enabled)
+	if injectLiveness {
+		if useTCP {
+			liveness = buildTCPProbe(port, initialDelay, period, timeout, failureThreshold)
+		} else if livenessPath != "" {
+			liveness = buildHTTPGetProbe(port, livenessPath, initialDelay, period, timeout, failureThreshold, successThreshold)
+		}
 	}
 
-	// Build readiness probe
-	if useTCP {
-		readiness = buildTCPProbe(port, initialDelay, period, timeout, failureThreshold)
-	} else if readinessPath != "" {
-		readiness = buildHTTPGetProbe(port, readinessPath, initialDelay, period, timeout, failureThreshold, successThreshold)
+	// Build readiness probe (only if enabled)
+	if injectReadiness {
+		if useTCP {
+			readiness = buildTCPProbe(port, initialDelay, period, timeout, failureThreshold)
+		} else if readinessPath != "" {
+			readiness = buildHTTPGetProbe(port, readinessPath, initialDelay, period, timeout, failureThreshold, successThreshold)
+		}
 	}
 
-	// Build startup probe (longer initial delay)
-	if useTCP {
-		startup = buildTCPProbe(port, initialDelay*3, period, timeout, failureThreshold*2)
-	} else if startupPath != "" {
-		startup = buildHTTPGetProbe(port, startupPath, initialDelay, period, timeout, failureThreshold*2, successThreshold)
+	// Build startup probe (only if enabled)
+	if injectStartup {
+		if useTCP {
+			startup = buildTCPProbe(port, initialDelay*3, period, timeout, failureThreshold*2)
+		} else if startupPath != "" {
+			startup = buildHTTPGetProbe(port, startupPath, initialDelay, period, timeout, failureThreshold*2, successThreshold)
+		}
 	}
 
 	return liveness, readiness, startup
@@ -201,18 +228,34 @@ func getAnnotationInt(annotations map[string]string, key string, fallback int32)
 	return fallback
 }
 
+// getAnnotationBool retrieves an annotation value as bool with a fallback
+func getAnnotationBool(annotations map[string]string, key string, fallback bool) bool {
+	if val, ok := annotations[key]; ok && val != "" {
+		return val == "true" || val == "yes" || val == "1"
+	}
+	return fallback
+}
+
 // NeedsProbes checks if a container needs probes injected
-func NeedsProbes(container corev1.Container, requireBoth bool) bool {
+// Returns three bools: needsLiveness, needsReadiness, needsStartup
+func NeedsProbes(container corev1.Container, requireBoth bool) (needsLiveness, needsReadiness, needsStartup bool) {
 	hasLiveness := container.LivenessProbe != nil
 	hasReadiness := container.ReadinessProbe != nil
+	hasStartup := container.StartupProbe != nil
 
 	if requireBoth {
-		// Only inject if BOTH liveness and readiness are missing
-		return !hasLiveness && !hasReadiness
+		// Only inject liveness/readiness if BOTH are missing
+		needsLiveness = !hasLiveness
+		needsReadiness = !hasReadiness
+	} else {
+		needsLiveness = !hasLiveness
+		needsReadiness = !hasReadiness
 	}
 
-	// Inject if any probe is missing
-	return !hasLiveness || !hasReadiness
+	// P2: Startup is ALWAYS independent - inject if missing (for JVM containers)
+	needsStartup = !hasStartup
+
+	return needsLiveness, needsReadiness, needsStartup
 }
 
 // HasAnyProbes checks if a container has any probes defined
@@ -225,6 +268,12 @@ func HasCastaiManagedProbes(container corev1.Container) bool {
 	// Check if the container has our annotation marker
 	// This is a best-effort check - we can also check the workload annotations
 	return false // Will be implemented via workload annotation
+}
+
+// HasCastaiManagedProbesOnWorkload checks if the workload has the managed annotation
+func HasCastaiManagedProbesOnWorkload(annotations map[string]string) bool {
+	val, ok := annotations[AnnotationJVMProbeManaged]
+	return ok && val == "true"
 }
 
 // CreateProbePatch creates a JSON Patch to add probes to a container
