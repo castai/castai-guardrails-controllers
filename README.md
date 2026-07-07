@@ -44,15 +44,17 @@ Automatically detects JVM-based containers and injects appropriate health probes
 
 #### Features
 - **Framework detection** (Spring Boot, Quarkus, Micronaut, generic JVM)
-- **Image-based detection** (java, jdk, openjdk, spring, etc.)
-- **Environment variable detection** (JAVA_HOME, SPRING_PROFILES_ACTIVE)
+- **Image-based detection** with word-boundary regex (java, jdk, openjdk, spring, etc.) - avoids false positives
+- **Environment variable detection** (JAVA_HOME, SPRING_PROFILES_ACTIVE, JAVA_TOOL_OPTIONS) - strongest signal
 - **Configurable probe settings** via ConfigMap
 - **Annotation-based overrides**
 - **Probe framework paths** automatically set based on detected framework
 - **🆕 Startup probe always injected** for JVM containers (prevents premature termination)
 - **🆕 Automatic probe failure monitoring** - watches pod events for probe failures
-- **🆕 Auto-fix poor probe configurations** - adjusts delays/thresholds based on failure patterns
+- **🆕 Auto-fix poor probe configurations** - adjusts delays/thresholds based on failure patterns (framework-aware!)
 - **🆕 Force overwrite existing probes** - replace badly configured probes
+- **🆕 Dry-run / observe-only mode** - log intended changes without mutating workloads
+- **🆕 Liveness probe opt-in** - safer default for Spring Boot (requires management.endpoint.health.probes.enabled=true)
 
 #### Detected Frameworks
 
@@ -62,6 +64,8 @@ Automatically detects JVM-based containers and injects appropriate health probes
 | Quarkus | `/q/health/live` | `/q/health/ready` | `/q/health/started` |
 | Micronaut | `/health/liveness` | `/health/readiness` | `/health` |
 | Generic JVM | TCP socket | TCP socket | TCP socket |
+
+> **Note on Spring Boot Liveness**: The `/actuator/health/liveness` and `/actuator/health/readiness` endpoints only exist when `management.endpoint.health.probes.enabled=true` (Spring Boot 2.3+). Liveness probe injection is **opt-in** by default (`injectLivenessProbe: false`) to avoid 404s on pods without actuator sub-groups enabled. Enable via ConfigMap or annotation `workloads.cast.ai/jvm-probe-inject-liveness: "true"`.
 
 #### Annotations
 
@@ -76,6 +80,9 @@ Automatically detects JVM-based containers and injects appropriate health probes
 | `workloads.cast.ai/jvm-probe-overwrite-readiness` | Force overwrite readiness probe | `"true"` |
 | `workloads.cast.ai/jvm-probe-overwrite-startup` | Force overwrite startup probe | `"true"` |
 | `workloads.cast.ai/jvm-probe-log-failures` | **Enable detailed failure logging** | `"true"` |
+| `workloads.cast.ai/jvm-probe-inject-liveness` | **Override liveness injection** | `"true"` / `"false"` |
+| `workloads.cast.ai/jvm-probe-inject-readiness` | **Override readiness injection** | `"true"` / `"false"` |
+| `workloads.cast.ai/jvm-probe-inject-startup` | **Override startup injection** | `"true"` / `"false"` |
 
 **Example - Basic Usage:**
 ```yaml
@@ -226,28 +233,76 @@ metadata:
   name: castai-jvm-probe-controller-config
   namespace: castai-agent
 data:
-  # Framework configurations - startup probes always injected for JVM
+  # Framework configurations
   frameworks: |-
     {
       "spring-boot": {
         "livenessPath": "/actuator/health/liveness",
         "readinessPath": "/actuator/health/readiness",
         "startupPath": "/actuator/health",
+        "defaultPort": 8080,
         "initialDelaySeconds": 60,
-        "startupProbeMultiplier": 3
+        "periodSeconds": 10,
+        "timeoutSeconds": 5,
+        "failureThreshold": 3,
+        "successThreshold": 1,
+        "useTCPSocket": false
+      },
+      "quarkus": {
+        "livenessPath": "/q/health/live",
+        "readinessPath": "/q/health/ready",
+        "startupPath": "/q/health/started",
+        "defaultPort": 8080,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 10,
+        "timeoutSeconds": 5,
+        "failureThreshold": 3,
+        "successThreshold": 1,
+        "useTCPSocket": false
+      },
+      "micronaut": {
+        "livenessPath": "/health/liveness",
+        "readinessPath": "/health/readiness",
+        "startupPath": "/health",
+        "defaultPort": 8080,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 10,
+        "timeoutSeconds": 5,
+        "failureThreshold": 3,
+        "successThreshold": 1,
+        "useTCPSocket": false
+      },
+      "generic": {
+        "livenessPath": "",
+        "readinessPath": "",
+        "startupPath": "",
+        "defaultPort": 8080,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 10,
+        "timeoutSeconds": 5,
+        "failureThreshold": 3,
+        "successThreshold": 1,
+        "useTCPSocket": true
       }
     }
-  requireBothProbes: "false"   # Will inject any missing probe
-  alwaysInjectStartupProbe: "true"  # Critical for JVM slow-start
-  # Probe auto-fix settings
-  probeAutoFixEnabled: "true"
-  failureThresholdBeforeFix: "5"
-  timeWindowForFailures: "5m"
-  maxInitialDelaySeconds: "300"
-  maxFailureThreshold: "10"
+
+  # P1: Liveness probe safety - opt-in by default (requires actuator sub-groups enabled)
+  injectLivenessProbe: "false"
+  injectReadinessProbe: "true"
+  injectStartupProbe: "true"
+
+  # P2: Dry-run / observe-only mode - safe default for first install
+  dryRun: "true"
+  logIntendedChanges: "true"
+
+  # Existing settings
+  requireBothProbes: "true"       # Inject liveness/readiness only if BOTH missing
+  skipIfAnyProbeExists: "false"   # Override with annotations
+  logInterval: "15m"
+  reconcileInterval: "2m"
   exclusions: |-
     [
-      {"namespaceRegex": "^kube-system$"}
+      {"namespaceRegex": "^kube-.*"}
     ]
 ```
 
@@ -270,18 +325,22 @@ The JVM Probe Controller includes a sophisticated **Pod Event Monitor** that:
 
 **When triggered, you'll see logs like:**
 ```
-╔════════════════════════════════════════════════════════════════╗
+╔═════════════════════════════════════════════════════════════════╗
 ║              PROBE FIX APPLIED                                 ║
 ╠════════════════════════════════════════════════════════════════╣
 ║ Workload: default/my-app
 ║ Container: spring-boot
 ║ Probe Type: liveness
+║ Framework: spring-boot
+║ Port: 8080
 ║ Reason: High failure rate - container needs more startup time
 ║ Changes:
 ║   InitialDelay: 30 → 120 seconds
 ║   FailureThreshold: 3 → 6
 ╚════════════════════════════════════════════════════════════════╝
 ```
+
+> **Fixed in this version**: Auto-fix now uses the **same framework-aware logic** as initial injection. Quarkus apps get `/q/health/live`, Micronaut gets `/health/liveness`, Generic JVM gets TCP socket - not Spring paths! Also preserves existing handler (exec/tcpSocket/grpc) - only timing fields are updated.
 
 **Failure Logging Format:**
 ```
@@ -471,6 +530,17 @@ kubectl create namespace castai-agent
 kubectl apply -f manifests/
 ```
 
+### GitOps Considerations (ArgoCD/Flux)
+
+This controller patches Deployment/StatefulSet specs directly via JSON Patch.
+GitOps tools (ArgoCD, Flux) will detect drift and revert changes, causing a reconciliation loop.
+
+Workarounds:
+1. Add bypass annotation for GitOps-managed workloads:
+   workloads.cast.ai/jvm-probe-bypass: "true"
+2. Use annotation overrides to declare desired probe config declaratively in Git.
+3. Run in dry-run mode (dryRun: true - default) and apply changes via GitOps PRs.
+
 ### Individual Helm Charts
 
 #### TSC Controller
@@ -551,26 +621,67 @@ config:
 replicaCount: 2
 
 config:
-  probeDefaults:
-    liveness:
+  # Framework configurations (matching DefaultFrameworkConfigs in code)
+  frameworks:
+    spring-boot:
+      livenessPath: "/actuator/health/liveness"
+      readinessPath: "/actuator/health/readiness"
+      startupPath: "/actuator/health"
+      defaultPort: 8080
       initialDelaySeconds: 60
       periodSeconds: 10
       timeoutSeconds: 5
       failureThreshold: 3
-    readiness:
+      successThreshold: 1
+      useTCPSocket: false
+    quarkus:
+      livenessPath: "/q/health/live"
+      readinessPath: "/q/health/ready"
+      startupPath: "/q/health/started"
+      defaultPort: 8080
       initialDelaySeconds: 30
       periodSeconds: 10
       timeoutSeconds: 5
       failureThreshold: 3
-    startup:
-      initialDelaySeconds: 10
-      periodSeconds: 5
-      timeoutSeconds: 3
-      failureThreshold: 30
-  autoFixMode: true
-  autoFixThreshold: 3
-  maxInitialDelay: 300
-  alwaysInjectStartupProbe: true
+      successThreshold: 1
+      useTCPSocket: false
+    micronaut:
+      livenessPath: "/health/liveness"
+      readinessPath: "/health/readiness"
+      startupPath: "/health"
+      defaultPort: 8080
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+      useTCPSocket: false
+    generic:
+      livenessPath: ""
+      readinessPath: ""
+      startupPath: ""
+      defaultPort: 8080
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+      useTCPSocket: true
+
+  # P1: Liveness probe safety - opt-in by default
+  injectLivenessProbe: "false"
+  injectReadinessProbe: "true"
+  injectStartupProbe: "true"
+
+  # P2: Dry-run / observe-only mode - safe default
+  dryRun: "true"
+  logIntendedChanges: "true"
+
+  # Existing settings
+  requireBothProbes: "true"
+  skipIfAnyProbeExists: "false"
+  logInterval: "15m"
+  reconcileInterval: "2m"
 ```
 
 ## License

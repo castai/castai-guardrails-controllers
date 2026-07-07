@@ -7,6 +7,30 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+// P1: Word-boundary regex patterns for JVM image detection
+var jvmImagePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\bjava\b`),
+	regexp.MustCompile(`\bjdk\b`),
+	regexp.MustCompile(`\bjre\b`),
+	regexp.MustCompile(`\bopenjdk\b`),
+	regexp.MustCompile(`\btemurin\b`),
+	regexp.MustCompile(`\bcorretto\b`),
+	regexp.MustCompile(`\bzulu\b`),
+	regexp.MustCompile(`\beclipse-temurin\b`),
+	regexp.MustCompile(`\bamazoncorretto\b`),
+	regexp.MustCompile(`\bazul\b`),
+	regexp.MustCompile(`\bliberica\b`),
+	regexp.MustCompile(`\bbellsoft\b`),
+}
+
+// P1: False-positive patterns to exclude (javascript, bootstrap, etc.)
+var nonJVMImagePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`javascript`),
+	regexp.MustCompile(`javanese`),
+	regexp.MustCompile(`bootstrap`),
+	regexp.MustCompile(`reboot`),
+}
+
 // ContainerInfo holds detected JVM information
 type ContainerInfo struct {
 	Name      string
@@ -27,38 +51,40 @@ const (
 	FrameworkNone       = ""
 )
 
-// JVM image patterns to detect JVM-based containers
-var jvmImagePatterns = []string{
-	"java",
-	"jdk",
-	"jre",
-	"openjdk",
-	"temurin",
-	"corretto",
-	"zulu",
-	"eclipse-temurin",
-	"amazoncorretto",
-	"azul",
-	"liberica",
-	"bellsoft",
+// Framework-specific image patterns (word-boundary regex)
+var springBootImagePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\bspring\b`),
+	regexp.MustCompile(`\bboot\b`),
 }
 
-// Framework-specific image patterns
-var springBootImagePatterns = []string{
-	"spring",
-	"boot",
+var quarkusImagePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\bquarkus\b`),
 }
 
-var quarkusImagePatterns = []string{
-	"quarkus",
+var micronautImagePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\bmicronaut\b`),
+	regexp.MustCompile(`\bgraalvm\b`),
 }
 
-var micronautImagePatterns = []string{
-	"micronaut",
-	"graalvm",
+// envVarsIndicateJVM checks if environment variables strongly indicate a JVM container
+func envVarsIndicateJVM(env []corev1.EnvVar) bool {
+	for _, e := range env {
+		envNameLower := strings.ToLower(e.Name)
+		// Strong JVM indicators
+		if strings.HasPrefix(envNameLower, "java_") ||
+			envNameLower == "java_version" ||
+			envNameLower == "java_home" ||
+			envNameLower == "jvm_options" ||
+			envNameLower == "java_tool_options" ||
+			envNameLower == "_java_options" {
+			return true
+		}
+	}
+	return false
 }
 
 // DetectJVMContainer analyzes a container spec to determine if it's a JVM container
+// P1: Env vars checked FIRST (strongest signal), then image patterns with word boundaries
 func DetectJVMContainer(container corev1.Container) ContainerInfo {
 	info := ContainerInfo{
 		Name:      container.Name,
@@ -70,24 +96,18 @@ func DetectJVMContainer(container corev1.Container) ContainerInfo {
 		Env:       container.Env,
 	}
 
-	// Check image name patterns for JVM
-	imageLower := strings.ToLower(container.Image)
-	for _, pattern := range jvmImagePatterns {
-		if strings.Contains(imageLower, pattern) {
-			info.IsJVM = true
-			break
-		}
-	}
-
-	// Check environment variables for JVM indicators
+	// PHASE 1: Check environment variables FIRST (strongest signal)
 	for _, env := range container.Env {
 		envNameLower := strings.ToLower(env.Name)
 		_ = strings.ToLower(env.Value) // envValueLower reserved for future use
 
-		// Check for Java-specific environment variables
+		// Check for Java-specific environment variables (strongest JVM signal)
 		if strings.HasPrefix(envNameLower, "java_") ||
 			envNameLower == "java_version" ||
-			envNameLower == "java_home" {
+			envNameLower == "java_home" ||
+			envNameLower == "jvm_options" ||
+			envNameLower == "java_tool_options" ||
+			envNameLower == "_java_options" {
 			info.IsJVM = true
 		}
 
@@ -113,28 +133,52 @@ func DetectJVMContainer(container corev1.Container) ContainerInfo {
 		}
 	}
 
-	// Detect framework from image name
-	if info.Framework == FrameworkNone {
-		for _, pattern := range springBootImagePatterns {
-			if strings.Contains(imageLower, pattern) {
+	// PHASE 2: Image patterns with word boundaries (only if not already detected via env)
+	if !info.IsJVM {
+		imageLower := strings.ToLower(container.Image)
+		for _, re := range jvmImagePatterns {
+			if re.MatchString(imageLower) {
+				info.IsJVM = true
+				break
+			}
+		}
+		
+		// Check false-positive patterns (explicitly exclude unless env vars say JVM)
+		if !envVarsIndicateJVM(container.Env) {
+			for _, re := range nonJVMImagePatterns {
+				if re.MatchString(imageLower) {
+					info.IsJVM = false
+					break
+				}
+			}
+		}
+	}
+
+	// PHASE 3: Framework from image name (only if JVM detected and no framework yet)
+	if info.IsJVM && info.Framework == FrameworkNone {
+		imageLower := strings.ToLower(container.Image)
+		for _, re := range springBootImagePatterns {
+			if re.MatchString(imageLower) {
 				info.Framework = FrameworkSpringBoot
 				break
 			}
 		}
 	}
 
-	if info.Framework == FrameworkNone {
-		for _, pattern := range quarkusImagePatterns {
-			if strings.Contains(imageLower, pattern) {
+	if info.IsJVM && info.Framework == FrameworkNone {
+		imageLower := strings.ToLower(container.Image)
+		for _, re := range quarkusImagePatterns {
+			if re.MatchString(imageLower) {
 				info.Framework = FrameworkQuarkus
 				break
 			}
 		}
 	}
 
-	if info.Framework == FrameworkNone {
-		for _, pattern := range micronautImagePatterns {
-			if strings.Contains(imageLower, pattern) {
+	if info.IsJVM && info.Framework == FrameworkNone {
+		imageLower := strings.ToLower(container.Image)
+		for _, re := range micronautImagePatterns {
+			if re.MatchString(imageLower) {
 				info.Framework = FrameworkMicronaut
 				break
 			}

@@ -22,6 +22,11 @@ const (
 
 	// AnnotationFailureCountThreshold threshold before logging failures
 	AnnotationFailureCountThreshold = AnnotationPrefix + "failure-log-threshold"
+
+	// P1: Probe injection control annotations
+	AnnotationJVMInjectLiveness   = AnnotationPrefix + "inject-liveness"
+	AnnotationJVMInjectReadiness  = AnnotationPrefix + "inject-readiness"
+	AnnotationJVMInjectStartup    = AnnotationPrefix + "inject-startup"
 )
 
 // ShouldOverwriteAll checks if all probes should be overwritten
@@ -75,4 +80,31 @@ func GetFailureLogThreshold(annotations map[string]string, defaultVal int) int {
 		return defaultVal
 	}
 	return intVal
+}
+
+// ShouldInjectLiveness checks if liveness probe should be injected
+func ShouldInjectLiveness(annotations map[string]string, configDefault bool) bool {
+	val, ok := annotations[AnnotationJVMInjectLiveness]
+	if !ok {
+		return configDefault
+	}
+	return val == "true" || val == "yes" || val == "1"
+}
+
+// ShouldInjectReadiness checks if readiness probe should be injected
+func ShouldInjectReadiness(annotations map[string]string, configDefault bool) bool {
+	val, ok := annotations[AnnotationJVMInjectReadiness]
+	if !ok {
+		return configDefault
+	}
+	return val == "true" || val == "yes" || val == "1"
+}
+
+// ShouldInjectStartup checks if startup probe should be injected
+func ShouldInjectStartup(annotations map[string]string, configDefault bool) bool {
+	val, ok := annotations[AnnotationJVMInjectStartup]
+	if !ok {
+		return configDefault
+	}
+	return val == "true" || val == "yes" || val == "1"
 }
