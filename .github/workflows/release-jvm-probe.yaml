@@ -18,6 +18,7 @@ jobs:
   image:
     needs: prepare
     uses: ./.github/workflows/_release-image.yaml
+    secrets: inherit
     permissions:
       contents: read
       id-token: write
@@ -25,9 +26,6 @@ jobs:
       image_name: castai-jvm-probe-controller
       context: controllers/jvm-probe-controller
       version: ${{ needs.prepare.outputs.version }}
-    secrets:
-      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-      GCP_SERVICE_ACCOUNT_EMAIL: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
 
   helm:
     needs: prepare
