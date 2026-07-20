@@ -159,18 +159,56 @@ Both controllers follow the [castai-pdb-controller](https://github.com/castai/ca
 ### Prerequisites
 - Kubernetes 1.21+
 - kubectl configured with cluster access
+- Helm 3.x (recommended)
 
-### Quick Install
+### 🎯 Recommended: Helm Install (Latest Versions)
+
+Helm charts are the **primary and recommended** installation method. They are always up-to-date with the latest features, images, and configuration options.
+
 ```bash
-kubectl apply -f manifests/
+# Create namespace
+kubectl create namespace castai-agent
+
+# Install all controllers (recommended)
+helm repo add castai https://castai.github.io/helm-charts
+helm repo update
+
+# Install TSC Controller
+helm install castai-tsc-controller castai/castai-tsc-controller -n castai-agent
+
+# Install JVM Probe Controller
+helm install castai-jvm-probe-controller castai/castai-jvm-probe-controller -n castai-agent
+
+# Or install from local source (development)
+cd controllers/tsc-controller/helm/castai-tsc-controller
+helm install castai-tsc-controller . -n castai-agent
+
+cd controllers/jvm-probe-controller/helm/castai-jvm-probe-controller
+helm install castai-jvm-probe-controller . -n castai-agent
 ```
 
 This creates:
 - Namespace: `castai-agent`
 - ServiceAccount: `castai-workload-controllers`
 - ClusterRole & ClusterRoleBinding
-- ConfigMaps for both controllers
-- Deployments (2 replicas each with leader election)
+- ConfigMaps with **latest features** (dryRun, enableTSCManagement, enableProbeManagement, etc.)
+- Deployments with leader election (2 replicas)
+- **Correct images** matching chart versions
+
+### ⚠️ Legacy: kubectl apply (Not Recommended)
+
+```bash
+kubectl apply -f manifests/
+```
+
+> **⚠️ WARNING**: The `manifests/` folder is **legacy/deprecated** and may be outdated.
+> - Uses placeholder images (`bitnami/kubectl:latest`)
+> - Missing latest features (`dryRun`, `enableTSCManagement`, `enableProbeManagement`)
+> - Contains removed settings (`probeAutoFixEnabled`, etc.)
+> - Only 1 replica (no leader election)
+> - **Use Helm for production deployments**
+
+The `manifests/` folder is kept for reference only and is not guaranteed to be in sync with Helm charts.
 
 ### Building from Source
 
@@ -526,8 +564,16 @@ All three controllers are available as Helm charts for easy deployment.
 # Create namespace
 kubectl create namespace castai-agent
 
-# Install all controllers
-kubectl apply -f manifests/
+# Install from local source (development)
+cd controllers/tsc-controller/helm/castai-tsc-controller
+helm install castai-tsc-controller . -n castai-agent
+
+cd controllers/jvm-probe-controller/helm/castai-jvm-probe-controller
+helm install castai-jvm-probe-controller . -n castai-agent
+
+# Or from published charts (when available)
+# helm install castai-tsc-controller castai/castai-tsc-controller -n castai-agent
+# helm install castai-jvm-probe-controller castai/castai-jvm-probe-controller -n castai-agent
 ```
 
 ### GitOps Considerations (ArgoCD/Flux)
