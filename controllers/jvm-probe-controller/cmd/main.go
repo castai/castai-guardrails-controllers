@@ -54,7 +54,6 @@ var (
 
 	clientset           *kubernetes.Clientset
 	recorder            record.EventRecorder
-	stopCh              chan struct{}
 	config              *JVMConfig
 	configLock          sync.RWMutex
 	exclusionRules      *ExclusionRules
@@ -268,13 +267,12 @@ func parseConfigMap(cm *corev1.ConfigMap) *JVMConfig {
 	}
 	if val, ok := cm.Data["jvm-logIntendedChanges"]; ok {
 		cfg.LogIntendedChanges = val == "true"
+	}
 
 	// P3: Enable/disable probe management from env (allows disabling without ConfigMap change)
 	if envVal := os.Getenv("ENABLE_PROBE_MANAGEMENT"); envVal != "" {
 		cfg.EnableProbeManagement = envVal == "true"
 	}
-	}
-
 	return &cfg
 }
 
@@ -436,9 +434,7 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 	// Check if probe management is enabled
 	if !cfg.EnableProbeManagement {
 		logInfo("disabled", "Skipping %s, probe management disabled via ENABLE_PROBE_MANAGEMENT", nn)
-		workloadsLock.Lock()
-		workloadsProcessed[nn] = true
-		workloadsLock.Unlock()
+		// Don't mark as processed so it will be reprocessed when re-enabled
 		return nil
 	}
 
@@ -619,7 +615,7 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 	workloadsLock.Unlock()
 
 	logInfo("success", "Successfully processed workload %s", nn)
-	recorder.Eventf(obj.(runtime.Object), corev1.EventTypeNormal, "ProbesInjected", "JVM probes injected successfully")
+	recorder.Eventf(obj, corev1.EventTypeNormal, "ProbesInjected", "JVM probes injected successfully")
 
 	return nil
 }

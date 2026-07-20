@@ -1,0 +1,74 @@
+# CAST AI JVM Probe Controller - Migration Notes
+
+## Breaking Changes in v0.0.4
+
+The configuration schema has been significantly restructured. If you are upgrading from a previous version, please review the following changes:
+
+### Removed Configuration Keys
+
+The following keys have been **removed** and will be **silently ignored** if present in your values.yaml:
+
+| Old Key | Replacement |
+|---------|-------------|
+| `config.probeDefaults.liveness.initialDelaySeconds` | `config.frameworks.<framework>.initialDelaySeconds` |
+| `config.probeDefaults.liveness.periodSeconds` | `config.frameworks.<framework>.periodSeconds` |
+| `config.probeDefaults.liveness.timeoutSeconds` | `config.frameworks.<framework>.timeoutSeconds` |
+| `config.probeDefaults.liveness.failureThreshold` | `config.frameworks.<framework>.failureThreshold` |
+| `config.autoFixMode` | Removed - probe injection is now framework-driven |
+| `config.autoFixThreshold` | Removed - use framework-specific settings |
+| `config.maxInitialDelay` | Removed - use framework-specific `initialDelaySeconds` |
+| `config.alwaysInjectStartupProbe` | Removed - startup probes are now always injected for JVM apps |
+
+### New Configuration Structure
+
+All probe defaults are now defined per-framework under `config.frameworks`:
+
+```yaml
+config:
+  frameworks:
+    spring-boot:
+      livenessPath: "/actuator/health/liveness"
+      readinessPath: "/actuator/health/readiness"
+      startupPath: "/actuator/health"
+      defaultPort: 8080
+      initialDelaySeconds: 60
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+      useTCPSocket: false
+    # ... other frameworks
+```
+
+### New Features
+
+1. **ENABLE_PROBE_MANAGEMENT** env var - Disable probe injection without ConfigMap change:
+   ```yaml
+   # In deployment env:
+   - name: ENABLE_PROBE_MANAGEMENT
+     value: "false"
+   ```
+
+2. **Per-framework probe control** - Configure liveness/readiness/startup per framework:
+   ```yaml
+   config:
+     injectLivenessProbe: "false"    # Opt-in liveness (requires actuator sub-groups)
+     injectReadinessProbe: "true"
+     injectStartupProbe: "true"
+   ```
+
+3. **Dry-run mode** - Observe changes without applying:
+   ```yaml
+   config:
+     dryRun: "true"
+     logIntendedChanges: "true"
+   ```
+
+### Migration Steps
+
+1. Move your custom probe defaults from `config.probeDefaults` to the appropriate framework under `config.frameworks`
+2. Remove deprecated keys (`autoFixMode`, `autoFixThreshold`, `maxInitialDelay`, `alwaysInjectStartupProbe`)
+3. Set `config.injectLivenessProbe: "false"` if you don't want liveness probes by default
+4. Verify `config.enableProbeManagement: "true"` (default) or use the env var to disable
+
+For questions, see: https://github.com/castai/castai-guardrails-controllers

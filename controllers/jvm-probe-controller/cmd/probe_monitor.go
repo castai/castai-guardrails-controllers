@@ -657,12 +657,6 @@ func (p *PodEventMonitor) applyPatches(ctx context.Context, kind, namespace, nam
 	return err
 }
 
-// DEPRECATED: Old patchWorkloadProbes - kept for reference but not used
-// The new framework-aware version is patchWorkloadProbesFrameworkAware
-func (p *PodEventMonitor) patchWorkloadProbes(ctx context.Context, req FixRequest, fix ProbeFix) error {
-	return fmt.Errorf("deprecated - use patchWorkloadProbesFrameworkAware")
-}
-
 // findContainerIndex finds the index of a container in the workload
 func (p *PodEventMonitor) findContainerIndex(ctx context.Context, namespace, name, kind, containerName string) (int, error) {
 	switch kind {
