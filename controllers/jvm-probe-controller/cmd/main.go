@@ -268,6 +268,11 @@ func parseConfigMap(cm *corev1.ConfigMap) *JVMConfig {
 	}
 	if val, ok := cm.Data["jvm-logIntendedChanges"]; ok {
 		cfg.LogIntendedChanges = val == "true"
+
+	// P3: Enable/disable probe management from env (allows disabling without ConfigMap change)
+	if envVal := os.Getenv("ENABLE_PROBE_MANAGEMENT"); envVal != "" {
+		cfg.EnableProbeManagement = envVal == "true"
+	}
 	}
 
 	return &cfg
@@ -422,6 +427,15 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 
 	if exclusionRules.IsExcluded(namespace, name, labelsMap) {
 		logInfo("excluded", "Workload %s is excluded", nn)
+		workloadsLock.Lock()
+		workloadsProcessed[nn] = true
+		workloadsLock.Unlock()
+		return nil
+	}
+
+	// Check if probe management is enabled
+	if !cfg.EnableProbeManagement {
+		logInfo("disabled", "Skipping %s, probe management disabled via ENABLE_PROBE_MANAGEMENT", nn)
 		workloadsLock.Lock()
 		workloadsProcessed[nn] = true
 		workloadsLock.Unlock()

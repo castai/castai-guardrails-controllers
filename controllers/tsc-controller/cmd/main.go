@@ -69,6 +69,7 @@ type TSCConfig struct {
 	ReconcileInterval      time.Duration                     `json:"reconcileInterval"`
 	GarbageCollectInterval time.Duration                     `json:"garbageCollectInterval"`
 	DryRun                 bool                              `json:"dryRun"`
+	EnableTSCManagement    bool                              `json:"enableTSCManagement"`
 }
 
 type ExclusionRule struct {
@@ -185,6 +186,12 @@ func loadConfig() {
 	configLock.Lock()
 	defer configLock.Unlock()
 
+	// Read ENABLE_TSC_MANAGEMENT from env (allows disabling without ConfigMap change)
+	enableTSCManagement := true
+	if envVal := os.Getenv("ENABLE_TSC_MANAGEMENT"); envVal != "" {
+		enableTSCManagement = envVal == "true"
+	}
+
 	config = &TSCConfig{
 		DefaultConstraints: []corev1.TopologySpreadConstraint{
 			{
@@ -197,6 +204,7 @@ func loadConfig() {
 		ReconcileInterval:      2 * time.Minute,
 		GarbageCollectInterval: 5 * time.Minute,
 		DryRun:                 true, // SAFETY: Default to dry-run mode
+		EnableTSCManagement:    enableTSCManagement, // Default to enabled
 	}
 
 	// Try to load from ConfigMap
@@ -373,6 +381,15 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 		return
 	}
 
+
+	// Check if TSC management is enabled
+	configLock.RLock()
+	enableTSCMgmt := config.EnableTSCManagement
+	configLock.RUnlock()
+	if !enableTSCMgmt {
+		logDebug("tsc-disabled", "Skipping %s, TSC management disabled via ENABLE_TSC_MANAGEMENT", key)
+		return
+	}
 	// Build constraints
 	constraints := buildConstraints(namespace, name, annotations, labels)
 	if len(constraints) == 0 {
