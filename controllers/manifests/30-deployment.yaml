@@ -6,8 +6,9 @@ metadata:
   labels:
     app.kubernetes.io/name: castai-tsc-controller
     app.kubernetes.io/component: tsc-controller
+    app.kubernetes.io/version: "0.2.4"
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: castai-tsc-controller
@@ -20,12 +21,36 @@ spec:
       serviceAccountName: castai-workload-controllers
       containers:
         - name: tsc-controller
-          image: bitnami/kubectl:latest
-          command: ["sleep", "3600"]
+          image: us-docker.pkg.dev/castai-hub/library/castai-tsc-controller:0.0.2
+          ports:
+            - containerPort: 8080
+              name: metrics
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ENABLE_TSC_MANAGEMENT
+              value: "true"
           resources:
             requests:
               cpu: 50m
               memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -35,8 +60,9 @@ metadata:
   labels:
     app.kubernetes.io/name: castai-jvm-probe-controller
     app.kubernetes.io/component: jvm-probe-controller
+    app.kubernetes.io/version: "0.0.4"
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: castai-jvm-probe-controller
@@ -49,9 +75,33 @@ spec:
       serviceAccountName: castai-workload-controllers
       containers:
         - name: jvm-probe-controller
-          image: bitnami/kubectl:latest
-          command: ["sleep", "3600"]
+          image: us-docker.pkg.dev/castai-hub/library/castai-jvm-probe-controller:0.0.2
+          ports:
+            - containerPort: 8080
+              name: metrics
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ENABLE_PROBE_MANAGEMENT
+              value: "true"
           resources:
             requests:
               cpu: 50m
               memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5

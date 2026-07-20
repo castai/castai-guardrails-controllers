@@ -3,107 +3,33 @@ kind: ConfigMap
 metadata:
   name: castai-tsc-controller-config
   namespace: castai-agent
-  labels:
-    app.kubernetes.io/component: tsc-controller
 data:
-  defaultConstraints: |-
-    [
-      {
-        "maxSkew": 1,
-        "topologyKey": "topology.kubernetes.io/zone",
-        "whenUnsatisfiable": "DoNotSchedule",
-        "labelSelector": {}
-      }
-    ]
-  logInterval: "15m"
+  defaultConstraints: |
+    [{"maxSkew":1,"topologyKey":"topology.kubernetes.io/zone","whenUnsatisfiable":"DoNotSchedule"}]
+  skipSingleReplica: "true"
   reconcileInterval: "2m"
   garbageCollectInterval: "5m"
-  exclusions: |-
-    [
-      {"namespaceRegex": "^kube-.*"},
-      {"namespaceRegex": "^castai-.*"}
-    ]
+  logLevel: "info"
+  enableTSCManagement: "true"
+  dryRun: "true"
+  exclusions: "[]"
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: castai-jvm-probe-controller-config
   namespace: castai-agent
-  labels:
-    app.kubernetes.io/component: jvm-probe-controller
 data:
-  # Framework configurations for probe injection
-  # Note: Startup probes are ALWAYS injected for JVM containers as they prevent
-  # premature pod termination during slow startup (especially important for Spring Boot)
-  frameworks: |-
-    {
-      "spring-boot": {
-        "livenessPath": "/actuator/health/liveness",
-        "readinessPath": "/actuator/health/readiness",
-        "startupPath": "/actuator/health",
-        "defaultPort": 8080,
-        "initialDelaySeconds": 60,
-        "periodSeconds": 10,
-        "timeoutSeconds": 5,
-        "failureThreshold": 3,
-        "successThreshold": 1,
-        "useTCPSocket": false,
-        "startupProbeMultiplier": 3
-      },
-      "quarkus": {
-        "livenessPath": "/q/health/live",
-        "readinessPath": "/q/health/ready",
-        "startupPath": "/q/health/started",
-        "defaultPort": 8080,
-        "initialDelaySeconds": 30,
-        "periodSeconds": 10,
-        "timeoutSeconds": 5,
-        "failureThreshold": 3,
-        "successThreshold": 1,
-        "useTCPSocket": false,
-        "startupProbeMultiplier": 2
-      },
-      "micronaut": {
-        "livenessPath": "/health/liveness",
-        "readinessPath": "/health/readiness",
-        "startupPath": "/health",
-        "defaultPort": 8080,
-        "initialDelaySeconds": 30,
-        "periodSeconds": 10,
-        "timeoutSeconds": 5,
-        "failureThreshold": 3,
-        "successThreshold": 1,
-        "useTCPSocket": false,
-        "startupProbeMultiplier": 2
-      },
-      "generic": {
-        "useTCPSocket": true,
-        "defaultPort": 8080,
-        "initialDelaySeconds": 30,
-        "periodSeconds": 10,
-        "timeoutSeconds": 5,
-        "failureThreshold": 3,
-        "successThreshold": 1,
-        "startupProbeMultiplier": 3
-      }
-    }
-  # Global settings
+  frameworks: |
+    {"spring-boot":{"livenessPath":"/actuator/health/liveness","readinessPath":"/actuator/health/readiness","startupPath":"/actuator/health","defaultPort":8080,"defaultStartupDelaySeconds":60,"defaultStartupTimeoutSeconds":300,"defaultStartupPeriodSeconds":10,"defaultStartupFailureThreshold":30},"quarkus":{"livenessPath":"/q/health/live","readinessPath":"/q/health/ready","startupPath":"/q/health/started","defaultPort":8080,"defaultStartupDelaySeconds":30,"defaultStartupTimeoutSeconds":180,"defaultStartupPeriodSeconds":10,"defaultStartupFailureThreshold":18},"micronaut":{"livenessPath":"/health/live","readinessPath":"/health/ready","startupPath":"/health/started","defaultPort":8080,"defaultStartupDelaySeconds":30,"defaultStartupTimeoutSeconds":180,"defaultStartupPeriodSeconds":10,"defaultStartupFailureThreshold":18},"generic":{"livenessPath":"/health","readinessPath":"/health","startupPath":"/health","defaultPort":8080,"defaultStartupDelaySeconds":90,"defaultStartupTimeoutSeconds":300,"defaultStartupPeriodSeconds":10,"defaultStartupFailureThreshold":30}}
+  exclusions: "[]"
   logInterval: "15m"
-  reconcileInterval: "2m"
-  garbageCollectInterval: "10m"
-  requireBothProbes: "false"
+  reconcileInterval: "15m"
+  requireBothProbes: "true"
   skipIfAnyProbeExists: "false"
-  # Always inject startup probes for JVM containers
-  alwaysInjectStartupProbe: "true"
-  # Probe auto-fix settings
-  probeAutoFixEnabled: "true"
-  failureThresholdBeforeFix: "5"
-  timeWindowForFailures: "5m"
-  # Maximum probe settings after auto-fix
-  maxInitialDelaySeconds: "300"
-  maxFailureThreshold: "10"
-  exclusions: |-
-    [
-      {"namespaceRegex": "^kube-.*"},
-      {"namespaceRegex": "^castai-.*"}
-    ]
+  injectLivenessProbe: "false"
+  injectReadinessProbe: "true"
+  injectStartupProbe: "true"
+  dryRun: "true"
+  logIntendedChanges: "true"
+  enableProbeManagement: "true"
