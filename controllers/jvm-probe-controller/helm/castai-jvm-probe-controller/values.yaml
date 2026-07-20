@@ -6,7 +6,7 @@ replicaCount: 2
 image:
   # GCP Artifact Registry (castai-hub). Use imagePullSecrets on the pod if required for your cluster.
   repository: us-docker.pkg.dev/castai-hub/library/castai-jvm-probe-controller
-  tag: "0.0.2"
+  tag: "v1.1.0"
   # Container image pull policy
   pullPolicy: IfNotPresent
 
@@ -19,31 +19,82 @@ serviceAccount:
   name: ""
   annotations: {}
 
-# Controller configuration
+# Controller configuration (new format matching v1.1.0)
 config:
-  probeDefaults:
-    liveness:
-      initialDelaySeconds: 60
-      periodSeconds: 10
-      timeoutSeconds: 5
-      failureThreshold: 3
-    readiness:
-      initialDelaySeconds: 30
-      periodSeconds: 10
-      timeoutSeconds: 5
-      failureThreshold: 3
-    startup:
-      initialDelaySeconds: 10
-      periodSeconds: 5
-      timeoutSeconds: 3
-      failureThreshold: 30
+  # Framework configurations
+  frameworks: |-
+    {
+      "spring-boot": {
+        "livenessPath": "/actuator/health/liveness",
+        "readinessPath": "/actuator/health/readiness",
+        "startupPath": "/actuator/health",
+        "defaultPort": 8080,
+        "initialDelaySeconds": 60,
+        "periodSeconds": 10,
+        "timeoutSeconds": 5,
+        "failureThreshold": 3,
+        "successThreshold": 1,
+        "useTCPSocket": false
+      },
+      "quarkus": {
+        "livenessPath": "/q/health/live",
+        "readinessPath": "/q/health/ready",
+        "startupPath": "/q/health/started",
+        "defaultPort": 8080,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 10,
+        "timeoutSeconds": 5,
+        "failureThreshold": 3,
+        "successThreshold": 1,
+        "useTCPSocket": false
+      },
+      "micronaut": {
+        "livenessPath": "/health/liveness",
+        "readinessPath": "/health/readiness",
+        "startupPath": "/health",
+        "defaultPort": 8080,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 10,
+        "timeoutSeconds": 5,
+        "failureThreshold": 3,
+        "successThreshold": 1,
+        "useTCPSocket": false
+      },
+      "generic": {
+        "livenessPath": "",
+        "readinessPath": "",
+        "startupPath": "",
+        "defaultPort": 8080,
+        "initialDelaySeconds": 30,
+        "periodSeconds": 10,
+        "timeoutSeconds": 5,
+        "failureThreshold": 3,
+        "successThreshold": 1,
+        "useTCPSocket": true
+      }
+    }
 
-  autoFixMode: true  # Auto-detect and fix slow startups
-  autoFixThreshold: 3  # Restarts before triggering fix
-  maxInitialDelay: 300  # Max seconds to increase to
-  alwaysInjectStartupProbe: true
+  # P1: Liveness probe safety - opt-in by default (requires actuator sub-groups enabled)
+  injectLivenessProbe: "false"
+  injectReadinessProbe: "true"
+  injectStartupProbe: "true"
+
+  # P2: Dry-run / observe-only mode - safe default for first install
+  dryRun: "true"
+  logIntendedChanges: "true"
+
+  # P3: Enable/disable probe management (allows disabling without ConfigMap change)
+  enableProbeManagement: "true"
+
+  # Existing settings
+  requireBothProbes: "true"
+  skipIfAnyProbeExists: "false"
   logInterval: "15m"
-  exclusions: []
+  reconcileInterval: "2m"
+  exclusions: |-
+    [
+      {"namespaceRegex": "^kube-.*"}
+    ]
 
 podAnnotations: {}
 podLabels: {}

@@ -2,7 +2,7 @@ apiVersion: v2
 name: castai-tsc-controller
 description: CAST AI Topology Spread Constraints Controller - Automatically injects TopologySpreadConstraints into Deployments and StatefulSets
 type: application
-version: 0.2.3
+version: 0.2.4
 appVersion: "v1.0.0"
 keywords:
   - castai

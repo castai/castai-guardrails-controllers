@@ -6,31 +6,26 @@ metadata:
   labels:
     {{- include "castai-jvm-probe-controller.labels" . | nindent 4 }}
 data:
-  # Probe defaults
-  livenessInitialDelaySeconds: "{{ .Values.config.probeDefaults.liveness.initialDelaySeconds }}"
-  livenessPeriodSeconds: "{{ .Values.config.probeDefaults.liveness.periodSeconds }}"
-  livenessTimeoutSeconds: "{{ .Values.config.probeDefaults.liveness.timeoutSeconds }}"
-  livenessFailureThreshold: "{{ .Values.config.probeDefaults.liveness.failureThreshold }}"
+  # Framework configurations (JSON)
+  jvm-frameworks: '{{ .Values.config.frameworks | toJson }}'
 
-  readinessInitialDelaySeconds: "{{ .Values.config.probeDefaults.readiness.initialDelaySeconds }}"
-  readinessPeriodSeconds: "{{ .Values.config.probeDefaults.readiness.periodSeconds }}"
-  readinessTimeoutSeconds: "{{ .Values.config.probeDefaults.readiness.timeoutSeconds }}"
-  readinessFailureThreshold: "{{ .Values.config.probeDefaults.readiness.failureThreshold }}"
+  # P1: Liveness probe safety - opt-in by default
+  jvm-injectLivenessProbe: "{{ .Values.config.injectLivenessProbe }}"
+  jvm-injectReadinessProbe: "{{ .Values.config.injectReadinessProbe }}"
+  jvm-injectStartupProbe: "{{ .Values.config.injectStartupProbe }}"
 
-  startupInitialDelaySeconds: "{{ .Values.config.probeDefaults.startup.initialDelaySeconds }}"
-  startupPeriodSeconds: "{{ .Values.config.probeDefaults.startup.periodSeconds }}"
-  startupTimeoutSeconds: "{{ .Values.config.probeDefaults.startup.timeoutSeconds }}"
-  startupFailureThreshold: "{{ .Values.config.probeDefaults.startup.failureThreshold }}"
+  # P2: Dry-run / observe-only mode
+  jvm-dryRun: "{{ .Values.config.dryRun }}"
+  jvm-logIntendedChanges: "{{ .Values.config.logIntendedChanges }}"
 
-  # Auto-fix settings
-  autoFixMode: "{{ .Values.config.autoFixMode }}"
-  autoFixThreshold: "{{ .Values.config.autoFixThreshold }}"
-  maxInitialDelay: "{{ .Values.config.maxInitialDelay }}"
-  alwaysInjectStartupProbe: "{{ .Values.config.alwaysInjectStartupProbe }}"
-  logInterval: "{{ .Values.config.logInterval }}"
+  # Existing settings
+  jvm-requireBothProbes: "{{ .Values.config.requireBothProbes }}"
+  jvm-skipIfAnyProbeExists: "{{ .Values.config.skipIfAnyProbeExists }}"
+  jvm-logInterval: "{{ .Values.config.logInterval }}"
+  jvm-reconcileInterval: "{{ .Values.config.reconcileInterval }}"
 
   {{- if .Values.config.exclusions }}
-  exclusions: '{{ .Values.config.exclusions | toJson }}'
+  jvm-exclusions: '{{ .Values.config.exclusions | toJson }}'
   {{- else }}
-  exclusions: "[]"
+  jvm-exclusions: "[]"
   {{- end }}

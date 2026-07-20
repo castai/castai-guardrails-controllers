@@ -39,6 +39,9 @@ type JVMConfig struct {
 
 	// P2: Dry-run / observe-only mode
 	DryRun                bool                        `yaml:"dryRun"`
+
+// P3: Enable/disable probe management (allows disabling without ConfigMap change)
+EnableProbeManagement bool                        `yaml:"enableProbeManagement"`
 	LogIntendedChanges    bool                        `yaml:"logIntendedChanges"`
 }
 
@@ -111,6 +114,8 @@ func DefaultJVMConfig() JVMConfig {
 		// P2: Dry-run mode (safer default)
 		DryRun:                 true,
 		LogIntendedChanges:     true,
+		// P3: Enable/disable probe management (allows disabling without ConfigMap change)
+		EnableProbeManagement:  true,
 	}
 }
 
