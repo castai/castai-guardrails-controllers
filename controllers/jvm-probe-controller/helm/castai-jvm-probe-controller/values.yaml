@@ -21,58 +21,52 @@ serviceAccount:
 
 # Controller configuration (new format matching v1.1.0)
 config:
-  # Framework configurations
-  frameworks: |-
-    {
-      "spring-boot": {
-        "livenessPath": "/actuator/health/liveness",
-        "readinessPath": "/actuator/health/readiness",
-        "startupPath": "/actuator/health",
-        "defaultPort": 8080,
-        "initialDelaySeconds": 60,
-        "periodSeconds": 10,
-        "timeoutSeconds": 5,
-        "failureThreshold": 3,
-        "successThreshold": 1,
-        "useTCPSocket": false
-      },
-      "quarkus": {
-        "livenessPath": "/q/health/live",
-        "readinessPath": "/q/health/ready",
-        "startupPath": "/q/health/started",
-        "defaultPort": 8080,
-        "initialDelaySeconds": 30,
-        "periodSeconds": 10,
-        "timeoutSeconds": 5,
-        "failureThreshold": 3,
-        "successThreshold": 1,
-        "useTCPSocket": false
-      },
-      "micronaut": {
-        "livenessPath": "/health/liveness",
-        "readinessPath": "/health/readiness",
-        "startupPath": "/health",
-        "defaultPort": 8080,
-        "initialDelaySeconds": 30,
-        "periodSeconds": 10,
-        "timeoutSeconds": 5,
-        "failureThreshold": 3,
-        "successThreshold": 1,
-        "useTCPSocket": false
-      },
-      "generic": {
-        "livenessPath": "",
-        "readinessPath": "",
-        "startupPath": "",
-        "defaultPort": 8080,
-        "initialDelaySeconds": 30,
-        "periodSeconds": 10,
-        "timeoutSeconds": 5,
-        "failureThreshold": 3,
-        "successThreshold": 1,
-        "useTCPSocket": true
-      }
-    }
+  # Framework configurations (structured YAML, converted to JSON for ConfigMap)
+  frameworks:
+    spring-boot:
+      livenessPath: "/actuator/health/liveness"
+      readinessPath: "/actuator/health/readiness"
+      startupPath: "/actuator/health"
+      defaultPort: 8080
+      initialDelaySeconds: 60
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+      useTCPSocket: false
+    quarkus:
+      livenessPath: "/q/health/live"
+      readinessPath: "/q/health/ready"
+      startupPath: "/q/health/started"
+      defaultPort: 8080
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+      useTCPSocket: false
+    micronaut:
+      livenessPath: "/health/liveness"
+      readinessPath: "/health/readiness"
+      startupPath: "/health"
+      defaultPort: 8080
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+      useTCPSocket: false
+    generic:
+      livenessPath: ""
+      readinessPath: ""
+      startupPath: ""
+      defaultPort: 8080
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+      useTCPSocket: true
 
   # P1: Liveness probe safety - opt-in by default (requires actuator sub-groups enabled)
   injectLivenessProbe: "false"
@@ -91,10 +85,8 @@ config:
   skipIfAnyProbeExists: "false"
   logInterval: "15m"
   reconcileInterval: "2m"
-  exclusions: |-
-    [
-      {"namespaceRegex": "^kube-.*"}
-    ]
+  exclusions:
+    - namespaceRegex: "^kube-.*"
 
 podAnnotations: {}
 podLabels: {}
