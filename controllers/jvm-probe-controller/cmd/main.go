@@ -54,7 +54,6 @@ var (
 
 	clientset           *kubernetes.Clientset
 	recorder            record.EventRecorder
-	stopCh              chan struct{}
 	config              *JVMConfig
 	configLock          sync.RWMutex
 	exclusionRules      *ExclusionRules
@@ -616,7 +615,7 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 	workloadsLock.Unlock()
 
 	logInfo("success", "Successfully processed workload %s", nn)
-	recorder.Eventf(obj.(runtime.Object), corev1.EventTypeNormal, "ProbesInjected", "JVM probes injected successfully")
+	recorder.Eventf(obj, corev1.EventTypeNormal, "ProbesInjected", "JVM probes injected successfully")
 
 	return nil
 }

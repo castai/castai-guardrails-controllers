@@ -54,7 +54,6 @@ var (
 
 	clientset        *kubernetes.Clientset
 	recorder         record.EventRecorder
-	stopCh           chan struct{}
 	config           *TSCConfig
 	configLock       sync.RWMutex
 	exclusionRules   []ExclusionRule
@@ -117,7 +116,6 @@ func main() {
 	loadConfig()
 
 	// Setup signal handling
-	stopCh = make(chan struct{})
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 

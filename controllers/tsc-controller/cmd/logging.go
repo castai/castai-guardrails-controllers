@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"sync"
@@ -115,9 +114,3 @@ func initLogging() {
 	logAlways("TSC Controller starting...")
 }
 
-// formatLogMessage formats a log message with timestamp
-func formatLogMessage(level string, format string, args ...interface{}) string {
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	msg := fmt.Sprintf(format, args...)
-	return fmt.Sprintf("[%s] %s %s", timestamp, level, msg)
-}
