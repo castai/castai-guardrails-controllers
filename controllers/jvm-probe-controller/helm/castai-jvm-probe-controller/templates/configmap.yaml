@@ -7,7 +7,7 @@ metadata:
     {{- include "castai-jvm-probe-controller.labels" . | nindent 4 }}
 data:
   # Framework configurations (JSON)
-  jvm-frameworks: '{{ .Values.config.frameworks | toJson }}'
+  jvm-frameworks: '{{ .Values.config.frameworks }}'
 
   # P1: Liveness probe safety - opt-in by default
   jvm-injectLivenessProbe: "{{ .Values.config.injectLivenessProbe }}"
@@ -25,7 +25,7 @@ data:
   jvm-reconcileInterval: "{{ .Values.config.reconcileInterval }}"
 
   {{- if .Values.config.exclusions }}
-  jvm-exclusions: '{{ .Values.config.exclusions | toJson }}'
+  jvm-exclusions: '{{ .Values.config.exclusions }}'
   {{- else }}
   jvm-exclusions: "[]"
   {{- end }}

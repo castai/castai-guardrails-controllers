@@ -381,25 +381,23 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 		return
 	}
 
-
-	// Check if TSC management is enabled
+	// Read config under lock once to avoid data race
 	configLock.RLock()
 	enableTSCMgmt := config.EnableTSCManagement
+	dryRun := config.DryRun
 	configLock.RUnlock()
+
+	// Check if TSC management is enabled
 	if !enableTSCMgmt {
 		logDebug("tsc-disabled", "Skipping %s, TSC management disabled via ENABLE_TSC_MANAGEMENT", key)
 		return
 	}
+
 	// Build constraints
 	constraints := buildConstraints(namespace, name, annotations, labels)
 	if len(constraints) == 0 {
 		return
 	}
-
-	// SAFETY: Check dry-run mode
-	configLock.RLock()
-	dryRun := config.DryRun
-	configLock.RUnlock()
 
 	if dryRun {
 		logInfo("tsc-dry-run", "[DRY-RUN] Would add %d TSC(s) to %s", len(constraints), key)
