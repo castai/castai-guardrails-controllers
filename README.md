@@ -195,21 +195,6 @@ This creates:
 - Deployments with leader election (2 replicas)
 - **Correct images** matching chart versions
 
-### ⚠️ Legacy: kubectl apply (Not Recommended)
-
-```bash
-kubectl apply -f manifests/
-```
-
-> **⚠️ WARNING**: The `manifests/` folder is **legacy/deprecated** and may be outdated.
-> - Uses placeholder images (`bitnami/kubectl:latest`)
-> - Missing latest features (`dryRun`, `enableTSCManagement`, `enableProbeManagement`)
-> - Contains removed settings (`probeAutoFixEnabled`, etc.)
-> - Only 1 replica (no leader election)
-> - **Use Helm for production deployments**
-
-The `manifests/` folder is kept for reference only and is not guaranteed to be in sync with Helm charts.
-
 ### Building from Source
 
 ```bash

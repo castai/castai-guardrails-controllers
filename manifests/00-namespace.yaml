@@ -1,7 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: castai-agent
-  labels:
-    app.kubernetes.io/name: castai-workload-controllers
-    app.kubernetes.io/part-of: castai
