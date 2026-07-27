@@ -209,50 +209,48 @@ INSTALL_PDB="${INSTALL_PDB:-false}"
 # Per-controller configuration
 # -------------------------
 configure_controller() {
-  # configure_controller <name> <default_tag> <default_replicas> <default_dry>
-  local name="$1"
+  # configure_controller <PREFIX> <default_tag> <default_replicas> <default_dry>
+  # PREFIX is the uppercase env-var prefix (TSC, JVM, PDB). Avoids ${var^^}
+  # which is bash 4+ only — broken on macOS /bin/bash 3.2.57.
+  local prefix="$1"
   local default_tag="$2"
   local default_replicas="$3"
   local default_dry="$4"
 
   echo ""
-  info "Configuring ${name} controller:"
+  info "Configuring ${prefix} controller:"
 
-  # Image tag
-  local current_tag_var="${name^^}_IMAGE_TAG"
-  local current_tag="${!current_tag_var:-$default_tag}"
+  # Resolve current values from env-var pattern ${PREFIX}_<key>
+  local current_tag_var="${prefix}_IMAGE_TAG"
+  local current_replicas_var="${prefix}_REPLICAS"
+  local current_dry_var="${prefix}_DRY_RUN"
+
+  local current_tag="$(eval echo \"\${${current_tag_var}:-\${default_tag}}\")"
+  local current_replicas="$(eval echo \"\${${current_replicas_var}:-\${default_replicas}}\")"
+  local current_dry="$(eval echo \"\${${current_dry_var}:-\${default_dry}}\")"
+
   if [ "$IS_INTERACTIVE" = true ]; then
     current_tag="$(prompt "  Image tag" "$current_tag")"
-  fi
-  eval "${name^^}_IMAGE_TAG=\"$current_tag\""
-
-  # Replicas
-  local current_replicas_var="${name^^}_REPLICAS"
-  local current_replicas="${!current_replicas_var:-$default_replicas}"
-  if [ "$IS_INTERACTIVE" = true ]; then
     current_replicas="$(prompt "  Replicas" "$current_replicas")"
-  fi
-  eval "${name^^}_REPLICAS=\"$current_replicas\""
-
-  # Dry-run
-  local current_dry_var="${name^^}_DRY_RUN"
-  local current_dry="${!current_dry_var:-$default_dry}"
-  if [ "$IS_INTERACTIVE" = true ]; then
     if confirm "  Install in dry-run mode? (logs intended changes, no mutations)" y; then
       current_dry="true"
     else
       current_dry="false"
     fi
   fi
-  eval "${name^^}_DRY_RUN=\"$current_dry\""
+
+  # Export resolved values back to caller's scope via eval (bash 3.2-safe pattern)
+  eval "${current_tag_var}=\"${current_tag}\""
+  eval "${current_replicas_var}=\"${current_replicas}\""
+  eval "${current_dry_var}=\"${current_dry}\""
 
   # Echo resolved values
   echo -e "  ${BLUE}→ tag=${current_tag}  replicas=${current_replicas}  dryRun=${current_dry}${NC}"
 }
 
-[ "$INSTALL_TSC" = true ] && configure_controller tsc "$TSC_IMAGE_TAG" "$TSC_REPLICAS" "$TSC_DRY_RUN"
-[ "$INSTALL_JVM" = true ] && configure_controller jvm "$JVM_IMAGE_TAG" "$JVM_REPLICAS" "$JVM_DRY_RUN"
-[ "$INSTALL_PDB" = true ] && configure_controller pdb "$PDB_IMAGE_TAG" "$PDB_REPLICAS" "$PDB_DRY_RUN"
+[ "$INSTALL_TSC" = true ] && configure_controller TSC "$TSC_IMAGE_TAG" "$TSC_REPLICAS" "$TSC_DRY_RUN"
+[ "$INSTALL_JVM" = true ] && configure_controller JVM "$JVM_IMAGE_TAG" "$JVM_REPLICAS" "$JVM_DRY_RUN"
+[ "$INSTALL_PDB" = true ] && configure_controller PDB "$PDB_IMAGE_TAG" "$PDB_REPLICAS" "$PDB_DRY_RUN"
 
 # -------------------------
 # Confirmation
