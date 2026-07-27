@@ -39,7 +39,7 @@ config:
   # Examples: "1", "50%", null, ""
   defaultMaxUnavailable: null
   # Automatically fix poor PDB configurations (true/false)
-  FixPoorPDBs: "false"    # Set to "true" for automatic correction, "false" for logging only
+  FixPoorPDBs: "true"     # Set to "true" for automatic correction, "false" for logging only
   # Log interval for repeated messages (e.g., "15m", "1h")
   logInterval: "15m"
   # PDB scan interval (e.g., "2m", "5m")
