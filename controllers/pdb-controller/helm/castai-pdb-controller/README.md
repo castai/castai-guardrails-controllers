@@ -66,7 +66,7 @@ helm install castai-pdb-controller castai/castai-pdb-controller \
 | `rbac.create` | Create RBAC resources | `true` |
 | `config.defaultMinAvailable` | Default minAvailable for PDBs | `"1"` (automatic PDB creation) |
 | `config.defaultMaxUnavailable` | Default maxUnavailable for PDBs | `null` (unset) |
-| `config.FixPoorPDBs` | Automatically fix poor PDB configurations | `"false"` |
+| `config.FixPoorPDBs` | Automatically fix poor PDB configurations | `"true"` |
 | `config.logInterval` | Log interval for repeated messages | `"15m"` |
 | `config.pdbScanInterval` | PDB scan interval | `"2m"` |
 | `config.garbageCollectInterval` | Garbage collection interval | `"2m"` |
@@ -115,6 +115,31 @@ config:
 ```
 
 **Note**: Use either `defaultMinAvailable` or `defaultMaxUnavailable`, not both. If both are set, `defaultMinAvailable` takes precedence. The template ensures only one value is present in the ConfigMap.
+
+### Poor PDB Auto-Fix (`FixPoorPDBs`)
+
+**Enabled by default** (`config.FixPoorPDBs: "true"`).
+
+A *poor* PDB is one that is overly restrictive and would block voluntary disruptions (node drains, cluster upgrades, scaling). The controller detects the following poor configurations and, with auto-fix on, deletes the offending PDB and recreates it using the safe defaults (`config.defaultMinAvailable` / `config.defaultMaxUnavailable`):
+
+- `minAvailable` equal to the workload's replica count (e.g. `minAvailable: 1` on a 1-replica workload)
+- `minAvailable: 100%`
+- `maxUnavailable: 0`
+- `maxUnavailable: 0%`
+
+Workloads carrying the `workloads.cast.ai/bypass-default-pdb: "true"` annotation are left untouched.
+
+#### HPA scaling to a single replica
+
+This is the most common trigger for auto-fix. When a Horizontal Pod Autoscaler scales a Deployment down to **1 replica**, any existing PDB with `minAvailable: 1` becomes poor (`minAvailable == replicas == 1`), which would block every voluntary disruption on that pod. With `FixPoorPDBs: "true"`, the controller removes the poor PDB and — because PDB creation only targets workloads with **2 or more replicas** — does not recreate one. The single remaining pod is then no longer protected against (and therefore no longer blocking) drains and other voluntary disruptions.
+
+Set `FixPoorPDBs: "false"` if you prefer warn-only mode (the controller logs the warning but leaves the PDB in place):
+
+```bash
+helm install castai-pdb-controller castai/castai-pdb-controller \
+  --set config.FixPoorPDBs="false" \
+  -n castai-agent --create-namespace
+```
 
 ### Using Helm --set Flag
 
