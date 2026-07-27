@@ -195,6 +195,27 @@ This creates:
 - Deployments with leader election (2 replicas)
 - **Correct images** matching chart versions
 
+### 🎯 Recommended: Interactive Installer
+
+For a guided experience, use the bundled `install.sh` (mirrors the `castctl` UX):
+
+```bash
+./install.sh
+```
+
+Features:
+- Auto-detects kubectl context and cluster name
+- Interactive menu to pick which controllers to install (TSC / JVM / PDB)
+- Spinner feedback during helm + rollout operations
+- Dry-run by default (observe-only), per-controller confirmation
+- Reads the image tag from each chart's `Chart.yaml` `appVersion` (always the version shipped with the chart)
+
+Non-interactive (CI / automation):
+
+```bash
+INSTALL_TSC=true INSTALL_JVM=true INSTALL_PDB=true ./install.sh
+```
+
 ### Building from Source
 
 ```bash

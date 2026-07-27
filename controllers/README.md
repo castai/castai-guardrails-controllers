@@ -154,6 +154,15 @@ Both controllers follow the [castai-pdb-controller](https://github.com/castai/ca
 - kubectl configured with cluster access
 
 ### Quick Install
+
+**Recommended** — interactive installer (auto-detects context, picks controllers, dry-run by default):
+
+```bash
+../install.sh
+```
+
+**Plain kubectl** (applies all controllers at once):
+
 ```bash
 kubectl apply -f manifests/
 ```
@@ -467,7 +476,10 @@ All three controllers are available as Helm charts for easy deployment.
 # Create namespace
 kubectl create namespace castai-agent
 
-# Install all controllers
+# Install all controllers (interactive menu; auto-detects context)
+../install.sh
+
+# Or apply the bundled manifests directly
 kubectl apply -f manifests/
 ```
 

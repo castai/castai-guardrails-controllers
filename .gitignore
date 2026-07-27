@@ -1,2 +1,5 @@
 .idea/
 mise.toml
+
+# macOS
+.DS_Store
