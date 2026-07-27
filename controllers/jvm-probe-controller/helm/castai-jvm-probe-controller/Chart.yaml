@@ -3,7 +3,7 @@ name: castai-jvm-probe-controller
 description: CAST AI JVM Probe Controller - Automatically detects JVM containers and injects health probes
 type: application
 version: 0.0.4
-appVersion: "0.0.4"
+appVersion: "0.0.2"
 keywords:
   - castai
   - kubernetes
