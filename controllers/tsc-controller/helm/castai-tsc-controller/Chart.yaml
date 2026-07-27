@@ -3,7 +3,7 @@ name: castai-tsc-controller
 description: CAST AI Topology Spread Constraints Controller - Automatically injects TopologySpreadConstraints into Deployments and StatefulSets
 type: application
 version: 0.2.4
-appVersion: "v1.0.0"
+appVersion: "0.0.2"
 keywords:
   - castai
   - kubernetes
