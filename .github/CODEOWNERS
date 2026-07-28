@@ -1,0 +1,8 @@
+# These users are automatically requested as reviewers on PRs touching the
+# matched paths. Branch protection on `main` requires code-owner review before
+# any PR can be merged.
+#
+# Syntax: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything in the repository
+* @marenascastai
