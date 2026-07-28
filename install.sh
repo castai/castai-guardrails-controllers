@@ -289,7 +289,7 @@ configure_dry_run() {
 
 [ "$INSTALL_TSC" = true ] && configure_dry_run TSC "$TSC_DRY_RUN"
 [ "$INSTALL_JVM" = true ] && configure_dry_run JVM "$JVM_DRY_RUN"
-[ "$INSTALL_PDB" = true ] && configure_dry_run PDB "$PDB_DRY_RUN"
+# PDB has no dry-run mode; FixPoorPDBs is enabled by default (controller is live on install).
 
 # -------------------------
 # Confirmation
@@ -303,7 +303,7 @@ if [ "$IS_INTERACTIVE" = true ]; then
   echo "  Cluster   : ${CLUSTER_NAME}"
   [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_APP:-latest}  dryRun=${TSC_DRY_RUN}"
   [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_APP:-latest}  dryRun=${JVM_DRY_RUN}"
-  [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_APP:-latest}  dryRun=${PDB_DRY_RUN}"
+  [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_APP:-latest}  FixPoorPDBs=true (live)"
   echo ""
 
   if ! confirm "Proceed with installation?" y; then
@@ -377,12 +377,9 @@ install_chart() {
              --set config.logIntendedChanges="$dry"
              --set config.enableProbeManagement="true") ;;
     PDB)
-      # PDB chart has no dryRun; translate to FixPoorPDBs
-      if [ "$dry" = "true" ]; then
-        args+=(--set config.FixPoorPDBs="false")
-      else
-        args+=(--set config.FixPoorPDBs="true")
-      fi
+      # PDB has no dry-run mode. FixPoorPDBs is enabled by default so the
+      # controller auto-remediates poor PDBs immediately on install.
+      args+=(--set config.FixPoorPDBs="true")
       ;;
   esac
 
@@ -441,14 +438,16 @@ echo ""
 echo "============================================================"
 ok "Installation finished."
 echo ""
-step "Watch dry-run logs:"
+step "Watch controller logs:"
 echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-tsc-controller       --tail=50 -f"
 echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-jvm-probe-controller --tail=50 -f"
 echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-pdb-controller      --tail=50 -f"
 echo ""
-step "Go live (turn off dry-run):"
-echo "    kubectl -n ${NAMESPACE} edit cm castai-tsc-controller-config       # set dryRun: \"false\""
-echo "    kubectl -n ${NAMESPACE} edit cm castai-jvm-probe-controller-config  # set dryRun: \"false\""
+step "Go live (turn off dry-run) — TSC & JVM (ConfigMap hot-reloads, no restart needed):"
+echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config       --type merge -p '{\"data\":{\"dryRun\":\"false\"}}'"
+echo "    kubectl -n ${NAMESPACE} patch cm castai-jvm-probe-controller-config --type merge -p '{\"data\":{\"jvm-dryRun\":\"false\"}}'"
+echo ""
+step "PDB is live by default (FixPoorPDBs=true). To re-apply via Helm:"
 echo "    helm upgrade castai-pdb-controller ${PDB_CHART} -n ${NAMESPACE} --set config.FixPoorPDBs=\"true\""
 echo ""
 step "Bypass a single workload with an annotation:"
