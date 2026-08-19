@@ -34,7 +34,7 @@ Once a patch is applied, there is no automatic way to reconstruct the pre-patch 
 3. **Reuse the existing CAST AI CRD pattern.** Mirror `recommendations.autoscaling.cast.ai` exactly — same namespace layout, same finalizer lifecycle, same `targetRef` shape, same status-conditions convention. One consistent mental model for operators.
 4. **Store in-cluster in namespaced CRDs, not on disk.** `/tmp` in a pod is ephemeral — a restart loses everything. CRDs live in etcd, are backed up by every standard tool, and are queryable via `kubectl`.
 5. **Rollback is a separate, deliberate action.** The controllers never auto-rollback. Recovery is triggered via a CLI (`rollback-*.sh`) that reads the CRDs and issues inverse patches.
-6. **Zero blast-radius change to the mutation path.** Snapshot writes happen *before* the patch call and must never block the patch on failure — a snapshot write error logs and continues. Losing rollback data for one workload is preferable to failing to reconcile.
+6. **Zero blast-radius change to the mutation path.** Snapshot writes happen *before* the patch call and must never block the patch on failure — a snapshot write error logs and continues. Losing rollback data for one workload is preferable to failing to reconcile. To prevent silent corruption from lost snapshots (a failed CRD write followed by a successful patch would otherwise let the next reconcile capture the *post-patch* state as "original"), the patch itself sets a `workloads.cast.ai/<controller>-managed` annotation on the workload. Capture is only attempted when *both* the CRD is absent *and* the managed annotation is absent — see §4.
 7. **Three-level gating, matching Workload Autoscaler.** Global `mode: recommend | apply` config, per-workload `bypass` annotation (already exists), optional whitelist label. Default mode: `apply`.
 8. **No retention machinery.** Finalizer + workload-informer cleanup deletes originals when the workload is deleted. No time-based expiry, no GC loop, no orphan sweep to maintain.
 
@@ -134,9 +134,10 @@ status:
 
 ### 3.3 Naming convention
 
-- CRD name: `<workload-namespace>-<workload-name>` (lowercased, DNS-1123 sanitised).
-- Rationale: avoids collisions between `default/my-app` and `prod/my-app` (both live in `castai-agent` after all).
-- Long names: if `<ns>-<name>` exceeds 253 chars (DNS limit), we truncate and append a short hash of the workload UID.
+- CRD name: `<workload-namespace>-<workload-name>-<uid8>` (lowercased, DNS-1123 sanitised), where `uid8` is the first 8 hex chars of `sha256(targetRef.uid)`.
+- Rationale: avoids collisions between `default/my-app` and `prod/my-app`, **and** between distinct workloads that sanitise to the same `<ns>-<name>` string (e.g. namespace `a-b` + name `c` vs. namespace `a` + name `b-c`, which both collapse to `a-b-c`). The UID hash makes the CRD name injective for the workload's lifetime.
+- Long names: if the full name exceeds 253 chars (DNS limit), we truncate the `<ns>-<name>` prefix to fit, keeping the `-<uid8>` suffix intact.
+- The full workload UID remains in `spec.targetRef.uid` for name-reuse verification at rollback time; the hash in the name is purely for uniqueness.
 
 ### 3.4 Presence flags — why they matter
 
@@ -175,13 +176,36 @@ Change to:
 Get(workload) at line ~410
   → compute needsPatch
   → if needsPatch:
+      // Capture is a no-op if EITHER the CRD already exists OR the workload
+      // already carries workloads.cast.ai/tsc-managed=true. This prevents
+      // capturing post-patch state as "original" after a failed CRD write.
       snapshotter.CaptureIfAbsent(ctx, workload, workload.Spec.Template.Spec.TopologySpreadConstraints)  // NEW
-      Patch(...)
+      // The patch below sets both the TSC change AND the managed annotation
+      // atomically, so a successful patch guarantees the annotation is set.
+      Patch(...)  // now also sets metadata.annotations["workloads.cast.ai/tsc-managed"]="true"
 ```
 
-The `Get()` at line ~410 already gives us the pre-patch state — we just plumb it through. `CaptureIfAbsent` is a no-op if a `TSCOriginal` already exists for this workload UID.
+The `Get()` at line ~410 already gives us the pre-patch state — we just plumb it through. `CaptureIfAbsent` is a no-op if a `TSCOriginal` already exists for this workload UID, or if the workload already carries the managed annotation.
 
 **`handleWorkloadUpdate` (line ~594)** — no additional capture needed. If the workload has ever been patched by us, the original was already captured on the first pass, and `CaptureIfAbsent` short-circuits.
+
+**`CaptureIfAbsent` semantics (both controllers):**
+
+```
+if workload.metadata.annotations["workloads.cast.ai/tsc-managed"] == "true" {
+    if crdExists {
+        return nil       // steady state: already captured
+    }
+    // Annotation set but CRD missing → snapshot was lost on a previous
+    // reconcile. Capturing NOW would record post-patch state as "original".
+    emitEvent(workload, "SnapshotLost", "managed annotation present but TSCOriginal missing; skipping capture")
+    return nil
+}
+// Neither annotation nor CRD → this is the true first mutation.
+return createTSCOriginal(...)
+```
+
+The managed annotation is written by the same `Patch()` that applies the TSC change, so under normal operation the annotation and the CRD are created together (order: CRD first, then Patch). If the CRD write fails and the Patch succeeds, the annotation is set but the CRD is missing — the `SnapshotLost` path catches this on the next reconcile and refuses to capture stale (post-patch) state as the original.
 
 ### 4.2 JVM-Probe controller
 
@@ -202,7 +226,14 @@ func (c *Controller) applyPatchesWithSnapshot(
     if len(patches) == 0 {
         return nil
     }
-    c.snapshotter.CaptureIfAbsent(ctx, obj, preState)  // NEW: best-effort, non-blocking on failure
+    // Best-effort snapshot: no-op if CRD exists OR the workload already
+    // carries workloads.cast.ai/jvm-probe-managed=true (§4.1 for full
+    // semantics — same shape here). Failures never block the patch.
+    c.snapshotter.CaptureIfAbsent(ctx, obj, preState)
+    // Append a JSON-Patch op that sets metadata.annotations
+    // ["workloads.cast.ai/jvm-probe-managed"]="true". The Patch call
+    // below then applies probes AND the annotation atomically.
+    patches = append(patches, managedAnnotationPatchOp(obj))  // NEW
     return c.applyPatches(ctx, obj, patches)
 }
 ```
@@ -350,7 +381,7 @@ Flow:
       - `kubectl patch tscoriginal <ns>-<name> -n castai-agent --type=merge --patch '{"status":{"conditions":[...RolledBack=True...]}}'`
       - Unless `--keep-original`: `kubectl patch tscoriginal ... --type=json --patch '[{"op":"remove","path":"/metadata/finalizers"}]'` → K8s GC deletes the CRD.
 3. Print a summary table (workload, before, after, status).
-4. `--pause-controller` scales the controller Deployment to 0 replicas first, restores at the end. Prevents the controller from re-patching mid-rollback.
+4. `--pause-controller` scales the controller Deployment (`castai-tsc-controller` or `castai-jvm-probe-controller`, as installed by the standard Helm chart) to 0 replicas first, restores at the end. Prevents the controller from re-patching mid-rollback. Only supports Deployment-based installs (the default and only shipped shape).
 
 ### 6.2 `rollback-jvm-probe.sh`
 
@@ -528,8 +559,9 @@ The finalizer `workloads.cast.ai/tsc-original` (or `jvm-probe-original`) is what
 
 | Failure | Impact | Mitigation |
 |---|---|---|
-| CRD create fails at first-patch time | Rollback data lost for that workload | Best-effort: log `WARN`, emit event `SnapshotFailed`, continue with patch. Snapshot never blocks reconcile. |
+| CRD create fails at first-patch time | Rollback data lost for that workload | Best-effort: log `WARN`, emit event `SnapshotFailed`, continue with patch. Snapshot never blocks reconcile. The patch itself sets a managed annotation, so on the next reconcile `CaptureIfAbsent` sees annotation-present + CRD-absent and emits `SnapshotLost` rather than capturing the post-patch state as "original" (§4). |
 | CRD `409 AlreadyExists` on Create | Two replicas raced | Swallow, treat as success. |
+| Two workloads sanitise to the same `<ns>-<name>` | Would silently overwrite pre-fix | UID hash in CRD name (§3.3) makes names injective per workload UID; distinct workloads always get distinct CRDs. |
 | CRD not installed | Every reconcile logs an error | Pre-flight check at startup: log fatal + emit event, refuse to start until CRD is present. Helm install applies the CRD from `crds/`. |
 | ConfigMap `mode: recommend` misinterpreted as `apply` | Unwanted patches | Config parser rejects unknown values (fail closed to `recommend`), emits `ConfigInvalid` event. |
 | Rollback CLI targets a container that no longer exists | Skipped | CLI matches by container name, logs skip line, continues with other containers. |
@@ -622,7 +654,7 @@ Note: unlike v1 of this design, we do **not** default the global mode to `recomm
 | Storage backend | Two CRDs in `workloads.cast.ai/v1`, mirroring `Recommendation` |
 | CRD namespace | `castai-agent` (mirrors Recommendation exactly) |
 | CRD scope | Namespace-scoped |
-| Naming | `<workload-namespace>-<workload-name>`, DNS-1123 sanitised, hash-suffix if truncated |
+| Naming | `<workload-namespace>-<workload-name>-<uid8>`, DNS-1123 sanitised; prefix truncated (not suffix) if length exceeds 253 chars |
 | Lifecycle | Finalizer + workload-delete informer; no time-based retention |
 | Default mode | `apply` (matches Workload Autoscaler's `immediate` default) |
 | Rollback interface | Standalone shell CLI, no controller endpoint |
