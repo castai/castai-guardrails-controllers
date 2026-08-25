@@ -3,3 +3,6 @@ mise.toml
 
 # macOS
 .DS_Store
+
+# Kimchi harness metadata (plans, notes, session state)
+.kimchi/
