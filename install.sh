@@ -220,39 +220,151 @@ if [ ! -t 0 ] || [ -n "${INSTALL_TSC}${INSTALL_JVM}${INSTALL_PDB}" ]; then
 fi
 
 # -------------------------
-# Controller selection menu
+# Controller selection menu (checkbox-style, Space to toggle, Enter to confirm)
 # -------------------------
+#
+# checkbox_menu <title> <name1> <name2> ...
+#
+# Renders a live-redrawn multi-select. Navigation: ↑/↓ or j/k. Toggle: Space.
+# Confirm: Enter. Cancel: Ctrl-C. Returns selected indices (space-separated,
+# 0-based) on stdout, or exits 130 on Ctrl-C.
+#
+# Pure bash + stty raw + ANSI escapes — no external deps beyond a VT100-ish
+# terminal (works on macOS Terminal.app, iTerm2, gnome-terminal, Linux tty).
+checkbox_menu() {
+  local title="$1"; shift
+  local -a items=("$@")
+  local n=${#items[@]}
+  local -a checked
+  local i
+  for ((i = 0; i < n; i++)); do checked[i]=0; done
+
+  local cursor=0
+
+  # Save current stty state; restore on any exit path
+  local saved_stty
+  saved_stty="$(stty -g </dev/tty)"
+  # shellcheck disable=SC2064
+  trap "stty '$saved_stty' </dev/tty; printf '\033[?25h' >/dev/tty" RETURN INT TERM
+
+  stty -echo -icanon min 1 time 0 </dev/tty
+  printf '\033[?25l' >/dev/tty   # hide cursor
+
+  # Initial render: print title + one line per item + a footer
+  {
+    printf '\n'
+    printf '  %s\n' "$title"
+    printf '  %s\n' "$(printf '%.0s─' $(seq 1 60))"
+    for ((i = 0; i < n; i++)); do printf '\n'; done
+    printf '\n'
+    printf '  \033[2m↑/↓ or j/k navigate  ·  Space toggles  ·  Enter confirms  ·  Ctrl-C cancels\033[0m\n'
+  } >/dev/tty
+
+  local footer_lines=3   # blank + hint + trailing blank room
+  local total_lines=$((n + 3 + footer_lines - 1))
+
+  redraw() {
+    # Move cursor up to the first item line
+    printf '\033[%dA' "$total_lines" >/dev/tty
+    # Skip the title (1) + separator (1) + leading blank (1) = 3 lines
+    printf '\033[3B' >/dev/tty
+
+    for ((i = 0; i < n; i++)); do
+      printf '\r\033[2K' >/dev/tty         # clear line
+      local mark=' '; [ "${checked[i]}" -eq 1 ] && mark='x'
+      if [ "$i" -eq "$cursor" ]; then
+        printf '  \033[36m❯\033[0m [\033[32m%s\033[0m] %s\n' "$mark" "${items[i]}" >/dev/tty
+      else
+        printf '    [%s] %s\n' "$mark" "${items[i]}" >/dev/tty
+      fi
+    done
+    # Move cursor back down past footer to leave prompt below
+    printf '\033[%dB' "$footer_lines" >/dev/tty
+  }
+
+  redraw
+
+  # Read loop — one byte at a time; decode arrow-key CSI sequences.
+  #
+  # Bash 3.2 (macOS default) does NOT accept fractional -t timeouts on `read`,
+  # so we cannot use `read -t 0.001` to peek the ESC-[ tail of an arrow key.
+  # Instead we switch the tty to a very short VMIN/VTIME poll (0 chars, 1 decisecond)
+  # right before the CSI peek, then restore blocking mode. This works on any
+  # POSIX stty and any bash version.
+  local key esc1 esc2
+  while :; do
+    IFS= read -rsn1 key </dev/tty || break
+    case "$key" in
+      $'\x1b')  # ESC — could be lone Esc or start of CSI (arrow)
+        # Non-blocking peek for the next two bytes.
+        stty min 0 time 1 </dev/tty          # up to 100 ms wait, then bail
+        esc1=''; esc2=''
+        IFS= read -rsn1 esc1 </dev/tty || true
+        IFS= read -rsn1 esc2 </dev/tty || true
+        stty min 1 time 0 </dev/tty          # back to blocking for the main loop
+        if [ "$esc1" = '[' ]; then
+          case "$esc2" in
+            A) [ "$cursor" -gt 0 ] && cursor=$((cursor - 1)); redraw ;;
+            B) [ "$cursor" -lt $((n - 1)) ] && cursor=$((cursor + 1)); redraw ;;
+          esac
+        fi
+        # bare Esc: ignore
+        ;;
+      j) [ "$cursor" -lt $((n - 1)) ] && cursor=$((cursor + 1)); redraw ;;
+      k) [ "$cursor" -gt 0 ] && cursor=$((cursor - 1)); redraw ;;
+      ' ')
+        checked[cursor]=$((1 - checked[cursor]))
+        redraw
+        ;;
+      '')  # Enter (empty read via -n1 on newline)
+        break
+        ;;
+    esac
+  done
+
+  # Restore terminal state (also restored on RETURN via trap)
+  stty "$saved_stty" </dev/tty
+  printf '\033[?25h' >/dev/tty
+  trap - RETURN INT TERM
+  printf '\n' >/dev/tty
+
+  # Emit selected indices
+  local out=''
+  for ((i = 0; i < n; i++)); do
+    [ "${checked[i]}" -eq 1 ] && out+="$i "
+  done
+  printf '%s' "${out% }"
+}
+
 if [ "$IS_INTERACTIVE" = true ]; then
   echo ""
   echo "============================================================"
   echo " CAST AI Workload Controllers — Install"
   echo "============================================================"
-  echo ""
-  echo "  [1] TSC Controller     — Topology Spread Constraints"
-  echo "  [2] JVM Probe          — JVM health/startup/liveness probes"
-  echo "  [3] PDB Controller     — Pod Disruption Budgets"
-  echo "  [4] Install ALL"
-  echo "  [5] Cancel"
-  echo ""
 
   while :; do
-    raw="$(prompt "Select controllers to install (e.g. '1 3', '4', or '5')" "")"
-    case "$raw" in
-      5|q|quit|cancel) fatal "Cancelled." ;;
-      ""|4|all) INSTALL_TSC=true; INSTALL_JVM=true; INSTALL_PDB=true; break ;;
-      *)
-        INSTALL_TSC=false; INSTALL_JVM=false; INSTALL_PDB=false; valid=true
-        for tok in $raw; do
-          case "$tok" in
-            1) INSTALL_TSC=true ;;
-            2) INSTALL_JVM=true ;;
-            3) INSTALL_PDB=true ;;
-            *) warn "Ignoring unknown selection: '$tok'"; valid=false ;;
-          esac
-        done
-        [ "$valid" = true ] && break
-        ;;
-    esac
+    selected="$(checkbox_menu "Select controllers to install" \
+      "TSC Controller  — Topology Spread Constraints" \
+      "JVM Probe       — JVM health/startup/liveness probes" \
+      "PDB Controller  — Pod Disruption Budgets")"
+
+    if [ -z "$selected" ]; then
+      if confirm "Nothing selected — cancel installation?" y; then
+        fatal "Cancelled by user."
+      fi
+      # loop back and re-render the menu
+      continue
+    fi
+
+    INSTALL_TSC=false; INSTALL_JVM=false; INSTALL_PDB=false
+    for idx in $selected; do
+      case "$idx" in
+        0) INSTALL_TSC=true ;;
+        1) INSTALL_JVM=true ;;
+        2) INSTALL_PDB=true ;;
+      esac
+    done
+    break
   done
 fi
 
