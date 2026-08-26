@@ -1,0 +1,116 @@
+{{- if .Values.installCRDs }}
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Authors of castai-guardrails-controllers
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: jvmprobeoriginals.workloads.cast.ai
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+    helm.sh/resource-policy: keep
+spec:
+  group: workloads.cast.ai
+  names:
+    kind: JVMProbeOriginal
+    listKind: JVMProbeOriginalList
+    plural: jvmprobeoriginals
+    singular: jvmprobeoriginal
+    shortNames:
+      - jvmo
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Target
+          type: string
+          jsonPath: .spec.targetRef.kind
+        - name: Workload
+          type: string
+          jsonPath: .spec.targetRef.name
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+        - name: RolledBack
+          type: string
+          jsonPath: .status.conditions[?(@.type=="RolledBack")].status
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - targetRef
+                - originalContainers
+                - capturedAt
+              properties:
+                targetRef:
+                  type: object
+                  required:
+                    - apiVersion
+                    - kind
+                    - namespace
+                    - name
+                    - uid
+                  properties:
+                    apiVersion: {type: string}
+                    kind: {type: string}
+                    namespace: {type: string}
+                    name: {type: string}
+                    uid: {type: string}
+                originalContainers:
+                  type: object
+                  additionalProperties:
+                    type: object
+                    properties:
+                      livenessProbe:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                      readinessProbe:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                      startupProbe:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                      livenessPresent: {type: boolean}
+                      readinessPresent: {type: boolean}
+                      startupPresent: {type: boolean}
+                capturedAt:
+                  type: string
+                  format: date-time
+                controllerVersion:
+                  type: string
+            status:
+              type: object
+              properties:
+                conditions:
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - type
+                  x-kubernetes-list-type: map
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type: {type: string}
+                      status: {type: string}
+                      reason: {type: string}
+                      message: {type: string}
+                      lastTransitionTime: {type: string, format: date-time}
+                      observedGeneration: {type: integer, format: int64}
+                observedGeneration:
+                  type: integer
+                  format: int64
+{{- end }}
