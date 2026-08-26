@@ -1,4 +1,4 @@
-{{- if .Values.installCRDs }}
+{{- if and .Values.installCRDs (not (lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "jvmprobeoriginals.workloads.cast.ai")) }}
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Authors of castai-guardrails-controllers
 ---
