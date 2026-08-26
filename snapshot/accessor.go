@@ -16,6 +16,9 @@ var TSCOriginalAccessor = Accessor[*workloadsv1.TSCOriginal]{
 	NamespaceOf: func(o *workloadsv1.TSCOriginal) string {
 		return o.Namespace
 	},
+	GenerationOf: func(o *workloadsv1.TSCOriginal) int64 {
+		return o.Generation
+	},
 	GetTargetRef: func(o *workloadsv1.TSCOriginal) workloadsv1.TargetRef {
 		return o.Spec.TargetRef
 	},
@@ -31,6 +34,9 @@ var TSCOriginalAccessor = Accessor[*workloadsv1.TSCOriginal]{
 	SetFinalizers: func(o **workloadsv1.TSCOriginal, fs []string) {
 		(*o).Finalizers = fs
 	},
+	SetObservedGeneration: func(o **workloadsv1.TSCOriginal, g int64) {
+		(*o).Status.ObservedGeneration = g
+	},
 }
 
 // JVMProbeOriginalAccessor binds Accessor[*JVMProbeOriginal].
@@ -40,6 +46,9 @@ var JVMProbeOriginalAccessor = Accessor[*workloadsv1.JVMProbeOriginal]{
 	},
 	NamespaceOf: func(o *workloadsv1.JVMProbeOriginal) string {
 		return o.Namespace
+	},
+	GenerationOf: func(o *workloadsv1.JVMProbeOriginal) int64 {
+		return o.Generation
 	},
 	GetTargetRef: func(o *workloadsv1.JVMProbeOriginal) workloadsv1.TargetRef {
 		return o.Spec.TargetRef
@@ -55,5 +64,8 @@ var JVMProbeOriginalAccessor = Accessor[*workloadsv1.JVMProbeOriginal]{
 	},
 	SetFinalizers: func(o **workloadsv1.JVMProbeOriginal, fs []string) {
 		(*o).Finalizers = fs
+	},
+	SetObservedGeneration: func(o **workloadsv1.JVMProbeOriginal, g int64) {
+		(*o).Status.ObservedGeneration = g
 	},
 }

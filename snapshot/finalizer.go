@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // FinalizerName returns the finalizer string used by a controller named
@@ -37,7 +39,7 @@ func AddFinalizer[T any](ctx context.Context, c Client[T], acc Accessor[T], name
 	if err != nil {
 		return fmt.Errorf("marshal finalizer patch: %w", err)
 	}
-	if _, err := c.Patch(ctx, namespace, name, PatchTypeJSONMerge, body); err != nil {
+	if _, err := c.Patch(ctx, namespace, name, types.MergePatchType, body); err != nil {
 		return fmt.Errorf("patch finalizer: %w", err)
 	}
 	return nil
@@ -71,7 +73,7 @@ func RemoveFinalizer[T any](ctx context.Context, c Client[T], acc Accessor[T], n
 	if err != nil {
 		return fmt.Errorf("marshal finalizer patch: %w", err)
 	}
-	if _, err := c.Patch(ctx, namespace, name, PatchTypeJSONMerge, body); err != nil {
+	if _, err := c.Patch(ctx, namespace, name, types.MergePatchType, body); err != nil {
 		return fmt.Errorf("patch finalizer remove: %w", err)
 	}
 	return nil

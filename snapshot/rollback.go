@@ -25,14 +25,14 @@ type TargetLookupFn[T any] func(ctx context.Context, snap T) (liveUID string, fo
 // the inverse patch to each referenced workload.
 //
 // Per-CRD flow (plan §4.2):
-//   1. Skip if RolledBack=True already (idempotency).
-//   2. Look up target workload by TargetRef.
-//      - Not found or UID mismatch → mark RolledBack=True with reason
-//        TargetGone and remove finalizer.
-//   3. Apply inverse patch via inverseFn.
-//   4. On success: set RolledBack=True, reason=RollbackApplied, remove finalizer.
-//   5. On failure: leave RolledBack=False, log, continue. Aggregated error
-//      returned at end.
+//  1. Skip if RolledBack=True already (idempotency).
+//  2. Look up target workload by TargetRef.
+//     - Not found or UID mismatch → mark RolledBack=True with reason
+//     TargetGone and remove finalizer.
+//  3. Apply inverse patch via inverseFn.
+//  4. On success: set RolledBack=True, reason=RollbackApplied, remove finalizer.
+//  5. On failure: leave RolledBack=False, log, continue. Aggregated error
+//     returned at end.
 func Rollback[T any](
 	ctx context.Context,
 	c Client[T],
@@ -69,11 +69,15 @@ func Rollback[T any](
 		if !found || errors.Is(lookupErr, ErrTargetGone) || liveUID != string(acc.GetTargetRef(snap).UID) {
 			logger.Infof("rollback: target gone for %s, marking RolledBack", name)
 			conds = SetCondition(conds, metav1.Condition{
-				Type:   ConditionRolledBack,
-				Status: metav1.ConditionTrue,
-				Reason: ReasonTargetGone,
+				Type:    ConditionRolledBack,
+				Status:  metav1.ConditionTrue,
+				Reason:  ReasonTargetGone,
+				Message: fmt.Sprintf("Target workload %s/%s is gone or UID mismatch; no rollback needed", acc.GetTargetRef(snap).Namespace, acc.GetTargetRef(snap).Name),
 			})
 			acc.SetConditions(&snap, conds)
+			if acc.SetObservedGeneration != nil {
+				acc.SetObservedGeneration(&snap, acc.GenerationOf(snap))
+			}
 			if _, uerr := c.UpdateStatus(ctx, namespace, snap); uerr != nil {
 				errs = append(errs, fmt.Errorf("update status %s: %w", name, uerr))
 				continue
@@ -90,11 +94,15 @@ func Rollback[T any](
 			logger.Errorf("rollback: inverse %s failed: %v", name, ierr)
 			errs = append(errs, fmt.Errorf("inverse %s: %w", name, ierr))
 			conds = SetCondition(conds, metav1.Condition{
-				Type:   ConditionRolledBack,
-				Status: metav1.ConditionFalse,
-				Reason: ReasonRollbackFailed,
+				Type:    ConditionRolledBack,
+				Status:  metav1.ConditionFalse,
+				Reason:  ReasonRollbackFailed,
+				Message: fmt.Sprintf("Inverse patch failed for %s/%s: %v", acc.GetTargetRef(snap).Namespace, acc.GetTargetRef(snap).Name, ierr),
 			})
 			acc.SetConditions(&snap, conds)
+			if acc.SetObservedGeneration != nil {
+				acc.SetObservedGeneration(&snap, acc.GenerationOf(snap))
+			}
 			if _, uerr := c.UpdateStatus(ctx, namespace, snap); uerr != nil {
 				logger.Warnf("rollback: status update after failure for %s: %v", name, uerr)
 			}
@@ -102,11 +110,15 @@ func Rollback[T any](
 		}
 
 		conds = SetCondition(conds, metav1.Condition{
-			Type:   ConditionRolledBack,
-			Status: metav1.ConditionTrue,
-			Reason: ReasonRollbackApplied,
+			Type:    ConditionRolledBack,
+			Status:  metav1.ConditionTrue,
+			Reason:  ReasonRollbackApplied,
+			Message: fmt.Sprintf("Rollback patch applied to %s/%s", acc.GetTargetRef(snap).Namespace, acc.GetTargetRef(snap).Name),
 		})
 		acc.SetConditions(&snap, conds)
+		if acc.SetObservedGeneration != nil {
+			acc.SetObservedGeneration(&snap, acc.GenerationOf(snap))
+		}
 		if _, uerr := c.UpdateStatus(ctx, namespace, snap); uerr != nil {
 			errs = append(errs, fmt.Errorf("update status %s: %w", name, uerr))
 			continue

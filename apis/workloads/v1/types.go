@@ -71,8 +71,8 @@ type TSCOriginalSpec struct {
 
 // TSCOriginalStatus is the status for TSCOriginal CRDs.
 type TSCOriginalStatus struct {
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 }
 
 // TSCOriginalList is a list of TSCOriginal.
@@ -131,8 +131,8 @@ type ContainerProbes struct {
 
 // JVMProbeOriginalStatus is the status for JVMProbeOriginal CRDs.
 type JVMProbeOriginalStatus struct {
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 }
 
 // JVMProbeOriginalList is a list of JVMProbeOriginal.

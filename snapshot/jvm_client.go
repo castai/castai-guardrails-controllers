@@ -65,6 +65,6 @@ func (c *JVMClient) List(ctx context.Context, _ string) ([]*workloadsv1.JVMProbe
 	return out, nil
 }
 
-func (c *JVMClient) Patch(ctx context.Context, _, name string, pt PatchType, data []byte) (*workloadsv1.JVMProbeOriginal, error) {
-	return c.inner.Patch(ctx, name, types.PatchType(pt), data, metav1.PatchOptions{})
+func (c *JVMClient) Patch(ctx context.Context, _, name string, pt types.PatchType, data []byte) (*workloadsv1.JVMProbeOriginal, error) {
+	return c.inner.Patch(ctx, name, pt, data, metav1.PatchOptions{})
 }
