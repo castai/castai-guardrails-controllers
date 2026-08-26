@@ -120,6 +120,59 @@ spin_fail() {
 }
 
 # -------------------------
+# Failure logging
+# -------------------------
+# Writes a timestamped diagnostic log under .kimchi/logs/ capturing the
+# environment, the failed helm command, and its full stdout+stderr.
+# Called by every fatal helm failure path so users have something to share.
+INSTALL_LOG_DIR="${SCRIPT_DIR:-$(pwd)}/.kimchi/logs"
+
+log_install_failure() {
+  # log_install_failure <label> <exit_code> <helm_output> [helm_command...]
+  local label="$1"
+  local rc="$2"
+  local helm_output="$3"
+  shift 3
+
+  mkdir -p "$INSTALL_LOG_DIR" 2>/dev/null || true
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
+  local log_file="${INSTALL_LOG_DIR}/install-${ts}.log"
+
+  {
+    echo "=== CAST AI Workload Controllers — Install Failure ==="
+    echo "Timestamp  : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "Label      : ${label}"
+    echo "Exit code  : ${rc}"
+    echo ""
+    echo "--- Environment ---"
+    echo "Helm version : $(helm version --template '{{.Version}}' 2>/dev/null || echo 'unknown')"
+    echo "Kubectl ctx  : $(kubectl config current-context 2>/dev/null || echo 'unknown')"
+    echo "Cluster      : ${CLUSTER_NAME:-unknown}"
+    echo "Namespace    : ${NAMESPACE:-unknown}"
+    echo ""
+    echo "--- Selected controllers ---"
+    echo "INSTALL_TSC=${INSTALL_TSC:-false}"
+    echo "INSTALL_JVM=${INSTALL_JVM:-false}"
+    echo "INSTALL_PDB=${INSTALL_PDB:-false}"
+    [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_DRY_RUN=${TSC_DRY_RUN}"
+    [ "${INSTALL_JVM:-false}" = true ] && echo "  JVM_DRY_RUN=${JVM_DRY_RUN}"
+    echo ""
+    echo "--- Helm command ---"
+    printf 'helm'
+    for a in "$@"; do
+      printf ' %q' "$a"
+    done
+    echo ""
+    echo ""
+    echo "--- Helm output (stdout + stderr) ---"
+    echo "$helm_output"
+  } > "$log_file" 2>&1
+
+  info "Detailed logs saved to: ${log_file}"
+}
+
+# -------------------------
 # Input helpers
 # -------------------------
 prompt() {
@@ -193,10 +246,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TSC_CHART="${SCRIPT_DIR}/controllers/tsc-controller/helm/castai-tsc-controller"
 JVM_CHART="${SCRIPT_DIR}/controllers/jvm-probe-controller/helm/castai-jvm-probe-controller"
 PDB_CHART="${SCRIPT_DIR}/controllers/pdb-controller/helm/castai-pdb-controller"
+CRDS_CHART="${SCRIPT_DIR}/controllers/crds/helm/castai-guardrails-crds"
 
 [ -d "$TSC_CHART" ] || fatal "TSC chart not found at $TSC_CHART"
 [ -d "$JVM_CHART" ] || fatal "JVM chart not found at $JVM_CHART"
 [ -d "$PDB_CHART" ] || fatal "PDB chart not found at $PDB_CHART"
+[ -d "$CRDS_CHART" ] || fatal "CRDs chart not found at $CRDS_CHART"
 
 # -------------------------
 # Read appVersion from Chart.yaml (single source of truth)
@@ -450,6 +505,36 @@ else
 fi
 
 # -------------------------
+# Install shared CRDs as a separate Helm release
+#
+# TSC and JVM controllers both depend on the CRDs defined in the CRD chart.
+# Installing them as a standalone release (castai-guardrails-crds) gives them
+# a single owner so Helm won't reject later controller installs with
+# "invalid ownership metadata" when the second controller tries to import
+# CRDs already owned by the first. The controller installs below pass
+# --set crds.enabled=false to avoid re-installing the CRDs.
+# -------------------------
+if [ "$INSTALL_TSC" = true ] || [ "$INSTALL_JVM" = true ]; then
+  step "Installing shared CRDs (castai-guardrails-crds)"
+  spin_start "  helm upgrade --install castai-guardrails-crds"
+  CRDS_HELM_CMD=(upgrade --install castai-guardrails-crds "$CRDS_CHART"
+                 --namespace "$NAMESPACE"
+                 --create-namespace
+                 --wait)
+  if helm_out="$(helm "${CRDS_HELM_CMD[@]}" 2>&1)"; then
+    spin_ok
+    ok "castai-guardrails-crds installed."
+  else
+    spin_fail
+    helm_rc=$?
+    warn "Helm output:"
+    echo "$helm_out" | sed 's/^/    /' >&2
+    log_install_failure "castai-guardrails-crds" "$helm_rc" "$helm_out" "${CRDS_HELM_CMD[@]}"
+    fatal "Failed to install castai-guardrails-crds (exit ${helm_rc})."
+  fi
+fi
+
+# -------------------------
 # Install controller helper
 # -------------------------
 install_chart() {
@@ -483,11 +568,17 @@ install_chart() {
   # Controller-specific: dry-run propagation
   case "$prefix" in
     TSC)
-      args+=(--set config.dryRun="$dry" --set config.enableTSCManagement="true") ;;
+      # CRDs are installed as a standalone release (castai-guardrails-crds) by
+      # install.sh to avoid ownership conflicts between controllers.
+      args+=(--set config.dryRun="$dry" --set config.enableTSCManagement="true"
+             --set crds.enabled=false) ;;
     JVM)
+      # CRDs are installed as a standalone release (castai-guardrails-crds) by
+      # install.sh to avoid ownership conflicts between controllers.
       args+=(--set config.dryRun="$dry"
              --set config.logIntendedChanges="$dry"
-             --set config.enableProbeManagement="true") ;;
+             --set config.enableProbeManagement="true"
+             --set crds.enabled=false) ;;
     PDB)
       # PDB has no dry-run mode. FixPoorPDBs is enabled by default so the
       # controller auto-remediates poor PDBs immediately on install.
@@ -506,6 +597,7 @@ install_chart() {
     helm_rc=$?
     warn "Helm output:"
     echo "$helm_out" | sed 's/^/    /' >&2
+    log_install_failure "$release" "$helm_rc" "$helm_out" "${args[@]}"
     fatal "Failed to install ${release} (exit ${helm_rc})."
   fi
 }

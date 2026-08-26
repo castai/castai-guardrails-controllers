@@ -137,8 +137,10 @@ management:
   mode: apply
 
 # CRD chart control — set false only if you install CRDs out-of-band.
+# Defaults to false because install.sh installs CRDs as a separate release
+# (castai-guardrails-crds) to avoid ownership conflicts between controllers.
 crds:
-  enabled: true
+  enabled: false
 
 # Pod disruption budget for the controller
 podDisruptionBudget:
