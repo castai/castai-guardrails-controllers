@@ -33,10 +33,13 @@ type CommonStatus struct {
 
 // TSCOriginal captures the pre-castai topology spread constraints of a workload
 // so the tsc-controller can restore them on rollback.
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=tsco,singular=tscoriginal,path=tscoriginals
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Target",type="string",JSONPath=".spec.targetRef.kind/.spec.targetRef.name"
+// +kubebuilder:printcolumn:name="Target Kind",type="string",JSONPath=".spec.targetRef.kind"
+// +kubebuilder:printcolumn:name="Target Name",type="string",JSONPath=".spec.targetRef.name"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="RolledBack",type="string",JSONPath=".status.conditions[?(@.type=='RolledBack')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
@@ -76,6 +79,7 @@ type TSCOriginalStatus struct {
 }
 
 // TSCOriginalList is a list of TSCOriginal.
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 type TSCOriginalList struct {
 	metav1.TypeMeta `json:",inline"`
@@ -86,10 +90,13 @@ type TSCOriginalList struct {
 
 // JVMProbeOriginal captures the pre-castai probe state of all containers of a
 // workload so the jvm-probe-controller can restore them on rollback.
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=jvmo,singular=jvmprobeoriginal,path=jvmprobeoriginals
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Target",type="string",JSONPath=".spec.targetRef.kind/.spec.targetRef.name"
+// +kubebuilder:printcolumn:name="Target Kind",type="string",JSONPath=".spec.targetRef.kind"
+// +kubebuilder:printcolumn:name="Target Name",type="string",JSONPath=".spec.targetRef.name"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="RolledBack",type="string",JSONPath=".status.conditions[?(@.type=='RolledBack')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
@@ -136,6 +143,7 @@ type JVMProbeOriginalStatus struct {
 }
 
 // JVMProbeOriginalList is a list of JVMProbeOriginal.
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 type JVMProbeOriginalList struct {
 	metav1.TypeMeta `json:",inline"`

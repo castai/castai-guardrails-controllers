@@ -1,3 +1,4 @@
+{{- if .Values.installCRDs }}
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Authors of castai-guardrails-controllers
 ---
@@ -377,3 +378,4 @@ spec:
     storage: true
     subresources:
       status: {}
+{{- end }}
