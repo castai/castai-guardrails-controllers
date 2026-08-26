@@ -24,7 +24,8 @@ jobs:
       id-token: write
     with:
       image_name: castai-tsc-controller
-      context: controllers/tsc-controller
+      context: .
+      dockerfile: controllers/tsc-controller/Dockerfile
       version: ${{ needs.prepare.outputs.version }}
 
   helm:

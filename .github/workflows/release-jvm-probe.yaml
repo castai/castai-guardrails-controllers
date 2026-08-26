@@ -24,7 +24,8 @@ jobs:
       id-token: write
     with:
       image_name: castai-jvm-probe-controller
-      context: controllers/jvm-probe-controller
+      context: .
+      dockerfile: controllers/jvm-probe-controller/Dockerfile
       version: ${{ needs.prepare.outputs.version }}
 
   helm:

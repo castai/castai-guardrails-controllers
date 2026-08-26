@@ -1,14 +1,15 @@
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
-WORKDIR /app
-COPY go.mod go.sum ./
+
+# Build context is the repo root so all controllers can share the same
+# workflow contract (context: ., file: controllers/<controller>/Dockerfile).
+WORKDIR /workspace/controllers/pdb-controller
+COPY . /workspace
 RUN go mod download
-COPY . .
 ARG TARGETOS
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /app/castai-pdb-controller-bin ./cmd
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /workspace/controllers/pdb-controller/castai-pdb-controller-bin ./cmd
 
 FROM alpine:3.19
 WORKDIR /app
-COPY --from=builder /app/castai-pdb-controller-bin .
+COPY --from=builder /workspace/controllers/pdb-controller/castai-pdb-controller-bin .
 CMD ["./castai-pdb-controller-bin"]
-

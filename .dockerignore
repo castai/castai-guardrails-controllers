@@ -1,0 +1,30 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# CI / harness
+.github
+.kimchi
+
+# Docs and pages
+docs
+pages
+README.md
+
+# Local scripts that aren't needed in the build
+build-and-push.sh
+deploy.sh
+install.sh
+
+# Output artifacts
+crds
+bin
+dist
+*.log
+
+# Editor / OS noise
+.DS_Store
+.idea
+.vscode
+*.swp
