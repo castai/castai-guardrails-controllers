@@ -55,10 +55,11 @@ config:
   garbageCollectInterval: "5m"
   # Application log level: debug, info, warn (or warning), error
   logLevel: "info"
-  # Enable/disable TSC management (allows disabling without ConfigMap change)
-  enableTSCManagement: true
-  # Dry-run mode: when true, only logs what would be changed without applying
-  dryRun: true
+  # NOTE: config.enableTSCManagement and config.dryRun are deprecated and
+  # removed from the rendered ConfigMap. The controller accepts them for
+  # backward compatibility (mapped to management.enabled and management.mode
+  # respectively, with a deprecation warning logged). Use management.enabled
+  # and management.mode below instead.
   # Exclusion rules for workloads to skip TSC injection
   # Each rule is evaluated independently; if a workload matches ANY rule, no TSC is injected
   # Within a single rule, all specified criteria (namespaceRegex, nameRegex, labels) must match (AND logic)

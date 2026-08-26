@@ -403,9 +403,9 @@ func (p *PodEventMonitor) applyFix(ctx context.Context, req FixRequest) {
 	p.applyTimingToProbe(readiness, timingFix)
 	p.applyTimingToProbe(startup, timingFix)
 
-	// P2: Dry-run check
-	if cfg != nil && cfg.DryRun {
-		logAlways("DRY-RUN: Would apply probe fix for %s/%s container=%s probe=%s",
+	// PR3: mode-based check (recommend = observe only).
+	if cfg != nil && cfg.Mode == ModeRecommend {
+		logAlways("RECOMMEND: Would apply probe fix for %s/%s container=%s probe=%s",
 			req.WorkloadNamespace, req.WorkloadName, req.ContainerName, req.ProbeType)
 		return
 	}

@@ -14,9 +14,10 @@ data:
   jvm-injectReadinessProbe: "{{ .Values.config.injectReadinessProbe }}"
   jvm-injectStartupProbe: "{{ .Values.config.injectStartupProbe }}"
 
-  # P2: Dry-run / observe-only mode
-  jvm-dryRun: "{{ .Values.config.dryRun }}"
   jvm-logIntendedChanges: "{{ .Values.config.logIntendedChanges }}"
+
+  # NOTE: jvm-dryRun and jvm-enableProbeManagement are deprecated; the
+  # controller still accepts them via backward-compatible parsing.
 
   # Existing settings
   jvm-requireBothProbes: "{{ .Values.config.requireBothProbes }}"

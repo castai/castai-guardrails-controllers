@@ -73,12 +73,12 @@ config:
   injectReadinessProbe: "true"
   injectStartupProbe: "true"
 
-  # P2: Dry-run / observe-only mode - safe default for first install
-  dryRun: "true"
   logIntendedChanges: "true"
-
-  # P3: Enable/disable probe management (allows disabling without ConfigMap change)
-  enableProbeManagement: "true"
+  # NOTE: config.dryRun and config.enableProbeManagement are deprecated and
+  # removed from the rendered ConfigMap. The controller accepts them for
+  # backward compatibility (mapped to management.enabled and management.mode
+  # respectively, with a deprecation warning logged). Use management.enabled
+  # and management.mode below instead.
 
   # Existing settings
   requireBothProbes: "true"

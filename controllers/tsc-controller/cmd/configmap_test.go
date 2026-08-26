@@ -37,9 +37,6 @@ func TestParseTSCConfig_Defaults(t *testing.T) {
 	if cfg.ReconcileInterval != 2*time.Minute {
 		t.Errorf("ReconcileInterval default = %v, want 2m", cfg.ReconcileInterval)
 	}
-	if !cfg.DryRun {
-		t.Errorf("DryRun default = false, want true")
-	}
 	if cfg.Version != "dev" {
 		t.Errorf("Version default = %q, want dev", cfg.Version)
 	}
@@ -138,6 +135,101 @@ func TestParseTSCConfig_OperatorNamespaceOverride(t *testing.T) {
 	}
 	if cfg.OperatorNamespace != "custom-ns" {
 		t.Errorf("OperatorNamespace = %q, want custom-ns", cfg.OperatorNamespace)
+	}
+}
+
+// Backward-compatibility: deprecated keys are mapped onto the canonical
+// fields with a deprecation warning. An explicit canonical key always wins.
+
+func TestParseTSCConfig_DeprecatedEnableTSCManagementFalse(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			"enableTSCManagement": "false",
+		},
+	}
+	cfg, errs := ParseTSCConfig(cm, "")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if cfg.ManagementEnabled {
+		t.Errorf("ManagementEnabled = true, want false (mapped from deprecated enableTSCManagement=false)")
+	}
+}
+
+func TestParseTSCConfig_DeprecatedEnableTSCManagementTrue(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			"enableTSCManagement": "true",
+		},
+	}
+	cfg, errs := ParseTSCConfig(cm, "")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if !cfg.ManagementEnabled {
+		t.Errorf("ManagementEnabled = false, want true (mapped from deprecated enableTSCManagement=true)")
+	}
+}
+
+func TestParseTSCConfig_DeprecatedDryRunTrueMapsToRecommend(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			"dryRun": "true",
+		},
+	}
+	cfg, errs := ParseTSCConfig(cm, "")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if cfg.Mode != ModeRecommend {
+		t.Errorf("Mode = %q, want %q (mapped from deprecated dryRun=true)", cfg.Mode, ModeRecommend)
+	}
+}
+
+func TestParseTSCConfig_DeprecatedDryRunFalseNoOverride(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			"dryRun": "false",
+		},
+	}
+	cfg, errs := ParseTSCConfig(cm, "")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if cfg.Mode != ModeApply {
+		t.Errorf("Mode = %q, want %q (dryRun=false is a no-op)", cfg.Mode, ModeApply)
+	}
+}
+
+func TestParseTSCConfig_CanonicalModeWinsOverDeprecatedDryRun(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			"mode":   ModeApply,
+			"dryRun": "true",
+		},
+	}
+	cfg, errs := ParseTSCConfig(cm, "")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if cfg.Mode != ModeApply {
+		t.Errorf("Mode = %q, want %q (explicit mode should win over deprecated dryRun)", cfg.Mode, ModeApply)
+	}
+}
+
+func TestParseTSCConfig_CanonicalManagementWinsOverDeprecatedEnableTSC(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			"managementEnabled":   "true",
+			"enableTSCManagement": "false",
+		},
+	}
+	cfg, errs := ParseTSCConfig(cm, "")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if !cfg.ManagementEnabled {
+		t.Errorf("ManagementEnabled = false, want true (explicit managementEnabled should win)")
 	}
 }
 

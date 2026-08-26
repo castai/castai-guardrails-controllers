@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +21,17 @@ const (
 // JVMConfig holds the controller configuration loaded from the ConfigMap plus
 // any environment-derived overrides. Mirrors the TSCConfig shape so the
 // rollback/snapshot state machine can be shared.
+//
+// Canonical model:
+//   - ManagementEnabled: master switch. false = stop patching.
+//   - Mode:              "apply" (patch) or "recommend" (snapshot-only).
+//   - RollbackOnDisable: when true and ManagementEnabled flips true→false,
+//                        run rollback.
+//   - SnapshotEnabled:   capture snapshots.
+//
+// Deprecated keys (jvm-enableProbeManagement, jvm-dryRun) are still parsed for
+// backward compatibility and mapped onto the canonical fields with a
+// deprecation warning logged.
 type JVMConfig struct {
 	// Existing fields
 	Frameworks            map[string]FrameworkConfig `json:"frameworks"`
@@ -31,9 +43,7 @@ type JVMConfig struct {
 	InjectLivenessProbe   bool                       `json:"injectLivenessProbe"`
 	InjectReadinessProbe  bool                       `json:"injectReadinessProbe"`
 	InjectStartupProbe    bool                       `json:"injectStartupProbe"`
-	DryRun                bool                       `json:"dryRun"`
 	LogIntendedChanges    bool                       `json:"logIntendedChanges"`
-	EnableProbeManagement bool                       `json:"enableProbeManagement"`
 
 	// New fields for PR3 (rollback + snapshot wiring)
 	ManagementEnabled bool   `json:"managementEnabled"`
@@ -69,6 +79,10 @@ func (c *JVMConfig) StateOf() RollbackState {
 
 // ParseJVMConfig builds a JVMConfig from the ConfigMap data and the
 // env-supplied version. Returns the config and any per-key parse errors.
+//
+// Deprecated keys (jvm-enableProbeManagement, jvm-dryRun) are accepted for
+// backward compatibility: a deprecation warning is logged and the canonical
+// fields are updated. An explicit canonical key always wins.
 func ParseJVMConfig(cm *corev1.ConfigMap, envVersion string) (*JVMConfig, []error) {
 	def := DefaultJVMConfig()
 	cfg := &def
@@ -127,21 +141,18 @@ func ParseJVMConfig(cm *corev1.ConfigMap, envVersion string) (*JVMConfig, []erro
 		cfg.InjectStartupProbe = v == "true"
 	}
 
-	if v, ok := data["jvm-dryRun"]; ok {
-		cfg.DryRun = v == "true"
-	}
 	if v, ok := data["jvm-logIntendedChanges"]; ok {
 		cfg.LogIntendedChanges = v == "true"
 	}
 
-	// PR3 fields
-	if v, ok := data["jvm-managementEnabled"]; ok && v != "" {
+	// PR3 fields (canonical, no jvm- prefix — matches the rendered ConfigMap).
+	if v, ok := data["managementEnabled"]; ok && v != "" {
 		cfg.ManagementEnabled = parseBool(v, true)
 	}
-	if v, ok := data["jvm-rollbackOnDisable"]; ok && v != "" {
+	if v, ok := data["rollbackOnDisable"]; ok && v != "" {
 		cfg.RollbackOnDisable = parseBool(v, false)
 	}
-	if v, ok := data["jvm-mode"]; ok && v != "" {
+	if v, ok := data["mode"]; ok && v != "" {
 		switch v {
 		case ModeApply, ModeRecommend:
 			cfg.Mode = v
@@ -149,11 +160,31 @@ func ParseJVMConfig(cm *corev1.ConfigMap, envVersion string) (*JVMConfig, []erro
 			errs = append(errs, &unknownModeError{value: v})
 		}
 	}
-	if v, ok := data["jvm-snapshotEnabled"]; ok && v != "" {
+	if v, ok := data["snapshotEnabled"]; ok && v != "" {
 		cfg.SnapshotEnabled = parseBool(v, true)
 	}
-	if v, ok := data["jvm-operatorNamespace"]; ok && v != "" {
+	if v, ok := data["operatorNamespace"]; ok && v != "" {
 		cfg.OperatorNamespace = v
+	}
+
+	// Deprecated keys — backward compatibility mapping.
+	// jvm-enableProbeManagement=false → ManagementEnabled=false.
+	// jvm-dryRun=true → Mode=recommend.
+	// Canonical keys (set above) win.
+	if v, ok := data["jvm-enableProbeManagement"]; ok {
+		log.Printf("[WARN] config-deprecated: jvm-enableProbeManagement is deprecated, use managementEnabled")
+		enable := v != "false"
+		if _, explicit := data["managementEnabled"]; !explicit {
+			cfg.ManagementEnabled = enable
+		}
+	}
+	if v, ok := data["jvm-dryRun"]; ok {
+		log.Printf("[WARN] config-deprecated: jvm-dryRun is deprecated, use mode=recommend")
+		if v == "true" {
+			if _, explicit := data["mode"]; !explicit {
+				cfg.Mode = ModeRecommend
+			}
+		}
 	}
 
 	return cfg, errs
