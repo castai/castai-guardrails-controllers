@@ -89,11 +89,7 @@ func DefaultJVMConfig() JVMConfig {
 		InjectLivenessProbe:    false,
 		InjectReadinessProbe:   true,
 		InjectStartupProbe:     true,
-		// P2: Dry-run mode (safer default)
-		DryRun:                 true,
 		LogIntendedChanges:     true,
-		// P3: Enable/disable probe management (allows disabling without ConfigMap change)
-		EnableProbeManagement:  true,
 		// PR3 defaults
 		ManagementEnabled:      true,
 		RollbackOnDisable:      false,

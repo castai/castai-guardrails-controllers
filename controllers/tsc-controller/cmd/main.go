@@ -576,7 +576,6 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 	configLock.RLock()
 	managementEnabled := config.ManagementEnabled
 	mode := config.Mode
-	dryRun := config.DryRun
 	configLock.RUnlock()
 
 	if !managementEnabled {
@@ -589,41 +588,36 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 		return
 	}
 
-	// Capture snapshot before patching (unless in recommend mode or snapshot disabled).
-	if mode != ModeRecommend {
-		// Look up live object to capture original TSCs.
-		var current []corev1.TopologySpreadConstraint
-		var currentPresent bool
-		switch kind {
-		case "Deployment":
-			d, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
-			if err == nil {
-				current = d.Spec.Template.Spec.TopologySpreadConstraints
-				currentPresent = d.Spec.Template.Spec.TopologySpreadConstraints != nil
-				if current == nil {
-					current = nil
-				}
-			}
-		case "StatefulSet":
-			s, err := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
-			if err == nil {
-				current = s.Spec.Template.Spec.TopologySpreadConstraints
-				currentPresent = s.Spec.Template.Spec.TopologySpreadConstraints != nil
-				if current == nil {
-					current = nil
-				}
+	// Capture snapshot before patching. The capture helper is a no-op when
+	// SnapshotEnabled=false or when the workload is already marked managed.
+	// In recommend mode we still capture so dry-runs build the rollback
+	// history, but we never patch.
+	var current []corev1.TopologySpreadConstraint
+	var currentPresent bool
+	switch kind {
+	case "Deployment":
+		d, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			current = d.Spec.Template.Spec.TopologySpreadConstraints
+			currentPresent = d.Spec.Template.Spec.TopologySpreadConstraints != nil
+			if current == nil {
+				current = nil
 			}
 		}
-		captureTSCOriginalWithCurrent(ctx, kind, namespace, name, annotations, uid, current, currentPresent)
+	case "StatefulSet":
+		s, err := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			current = s.Spec.Template.Spec.TopologySpreadConstraints
+			currentPresent = s.Spec.Template.Spec.TopologySpreadConstraints != nil
+			if current == nil {
+				current = nil
+			}
+		}
 	}
+	captureTSCOriginalWithCurrent(ctx, kind, namespace, name, annotations, uid, current, currentPresent)
 
 	if mode == ModeRecommend {
 		logInfo("tsc-recommend", "[RECOMMEND] Would add %d TSC(s) to %s", len(constraints), key)
-		return
-	}
-
-	if dryRun {
-		logInfo("tsc-dry-run", "[DRY-RUN] Would add %d TSC(s) to %s", len(constraints), key)
 		return
 	}
 

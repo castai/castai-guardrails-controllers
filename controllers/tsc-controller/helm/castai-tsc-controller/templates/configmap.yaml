@@ -11,10 +11,10 @@ data:
   logInterval: "{{ .Values.config.logInterval }}"
   reconcileInterval: "{{ .Values.config.reconcileInterval }}"
   garbageCollectInterval: "{{ .Values.config.garbageCollectInterval }}"
-  dryRun: "{{ .Values.config.dryRun }}"
-  enableTSCManagement: "{{ .Values.config.enableTSCManagement }}"
 
-  # NEW — rollback and management state (hot-reloaded)
+  # Rollback and management state (hot-reloaded)
+  # NOTE: dryRun and enableTSCManagement are deprecated; the controller still
+  # accepts them via backward-compatible parsing.
   managementEnabled: "{{ .Values.management.enabled }}"
   rollbackOnDisable: "{{ .Values.management.rollbackOnDisable }}"
   mode: "{{ .Values.management.mode }}"

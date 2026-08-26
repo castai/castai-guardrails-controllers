@@ -39,15 +39,12 @@ func TestParseJVMConfig_Defaults(t *testing.T) {
 	if cfg.ReconcileInterval != "2m" {
 		t.Errorf("ReconcileInterval default = %q, want 2m", cfg.ReconcileInterval)
 	}
-	if !cfg.DryRun {
-		t.Errorf("DryRun default = false, want true")
-	}
 }
 
 func TestParseJVMConfig_OverrideManagement(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
-			"jvm-managementEnabled": "false",
+			"managementEnabled": "false",
 		},
 	}
 	cfg, errs := ParseJVMConfig(cm, "v1.2.3")
@@ -65,7 +62,7 @@ func TestParseJVMConfig_OverrideManagement(t *testing.T) {
 func TestParseJVMConfig_OverrideRollbackOnDisable(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
-			"jvm-rollbackOnDisable": "true",
+			"rollbackOnDisable": "true",
 		},
 	}
 	cfg, errs := ParseJVMConfig(cm, "")
@@ -80,7 +77,7 @@ func TestParseJVMConfig_OverrideRollbackOnDisable(t *testing.T) {
 func TestParseJVMConfig_OverrideModeRecommend(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
-			"jvm-mode": ModeRecommend,
+			"mode": ModeRecommend,
 		},
 	}
 	cfg, errs := ParseJVMConfig(cm, "")
@@ -95,7 +92,7 @@ func TestParseJVMConfig_OverrideModeRecommend(t *testing.T) {
 func TestParseJVMConfig_OverrideSnapshotDisabled(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
-			"jvm-snapshotEnabled": "false",
+			"snapshotEnabled": "false",
 		},
 	}
 	cfg, errs := ParseJVMConfig(cm, "")
@@ -110,7 +107,7 @@ func TestParseJVMConfig_OverrideSnapshotDisabled(t *testing.T) {
 func TestParseJVMConfig_InvalidMode(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
-			"jvm-mode": "yolo",
+			"mode": "yolo",
 		},
 	}
 	_, errs := ParseJVMConfig(cm, "")
@@ -125,7 +122,7 @@ func TestParseJVMConfig_InvalidMode(t *testing.T) {
 func TestParseJVMConfig_OperatorNamespaceOverride(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
-			"jvm-operatorNamespace": "custom-ns",
+			"operatorNamespace": "custom-ns",
 		},
 	}
 	cfg, errs := ParseJVMConfig(cm, "")
@@ -145,7 +142,6 @@ func TestParseJVMConfig_ExistingFieldsPreserved(t *testing.T) {
 			"jvm-injectLivenessProbe":   "true",
 			"jvm-injectReadinessProbe":  "true",
 			"jvm-injectStartupProbe":    "false",
-			"jvm-dryRun":                "false",
 			"jvm-logIntendedChanges":    "true",
 			"jvm-logInterval":           "30s",
 			"jvm-reconcileInterval":     "5m",
@@ -170,9 +166,6 @@ func TestParseJVMConfig_ExistingFieldsPreserved(t *testing.T) {
 	if cfg.InjectStartupProbe {
 		t.Errorf("InjectStartupProbe = true, want false")
 	}
-	if cfg.DryRun {
-		t.Errorf("DryRun = true, want false")
-	}
 	if !cfg.LogIntendedChanges {
 		t.Errorf("LogIntendedChanges = false, want true")
 	}
@@ -181,6 +174,54 @@ func TestParseJVMConfig_ExistingFieldsPreserved(t *testing.T) {
 	}
 	if cfg.ReconcileInterval != "5m" {
 		t.Errorf("ReconcileInterval = %q, want 5m", cfg.ReconcileInterval)
+	}
+}
+
+// Backward-compatibility: deprecated keys are mapped onto canonical fields.
+
+func TestParseJVMConfig_DeprecatedEnableProbeManagementFalse(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			"jvm-enableProbeManagement": "false",
+		},
+	}
+	cfg, errs := ParseJVMConfig(cm, "")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if cfg.ManagementEnabled {
+		t.Errorf("ManagementEnabled = true, want false (mapped from deprecated jvm-enableProbeManagement=false)")
+	}
+}
+
+func TestParseJVMConfig_DeprecatedDryRunTrueMapsToRecommend(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			"jvm-dryRun": "true",
+		},
+	}
+	cfg, errs := ParseJVMConfig(cm, "")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if cfg.Mode != ModeRecommend {
+		t.Errorf("Mode = %q, want %q (mapped from deprecated jvm-dryRun=true)", cfg.Mode, ModeRecommend)
+	}
+}
+
+func TestParseJVMConfig_CanonicalModeWinsOverDeprecatedDryRun(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			"mode":      ModeApply,
+			"jvm-dryRun": "true",
+		},
+	}
+	cfg, errs := ParseJVMConfig(cm, "")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if cfg.Mode != ModeApply {
+		t.Errorf("Mode = %q, want %q (explicit mode should win)", cfg.Mode, ModeApply)
 	}
 }
 

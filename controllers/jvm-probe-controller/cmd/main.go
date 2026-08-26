@@ -636,8 +636,8 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 	}
 
 	// Check if probe management is enabled
-	if !cfg.EnableProbeManagement {
-		logInfo("disabled", "Skipping %s, probe management disabled via ENABLE_PROBE_MANAGEMENT", nn)
+	if !cfg.ManagementEnabled {
+		logInfo("disabled", "Skipping %s, probe management disabled via MANAGEMENT_ENABLED", nn)
 		// Don't mark as processed so it will be reprocessed when re-enabled
 		return nil
 	}
@@ -805,10 +805,11 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 		return nil
 	}
 
-	// P2: Dry-run mode - log intended changes but don't apply
-	if cfg.DryRun {
+	// PR3: recommend mode - log intended changes but don't apply (snapshots
+	// already captured above).
+	if cfg.Mode == ModeRecommend {
 		if cfg.LogIntendedChanges && len(intendedActions) > 0 {
-			logAlways("DRY-RUN: Would apply %d patches to %s: %s", 
+			logAlways("RECOMMEND: Would apply %d patches to %s: %s",
 				len(allPatches), nn, strings.Join(intendedActions, "; "))
 		}
 		workloadsLock.Lock()
