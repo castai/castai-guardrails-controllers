@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Authors of castai-guardrails-controllers
+
 package main
 
 import (
@@ -14,7 +17,9 @@ import (
 	"syscall"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
@@ -23,28 +28,32 @@ import (
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-		"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
-	appv1 "k8s.io/api/apps/v1"
+	workloadsv1 "github.com/castai/castai-guardrails-controllers/apis/workloads/v1"
+	workloadsclient "github.com/castai/castai-guardrails-controllers/clientset/versioned/typed/workloads/v1"
+	"github.com/castai/castai-guardrails-controllers/snapshot"
 )
 
 const (
-	ControllerName         = "castai-tsc-controller"
-	ConfigMapNamespace     = "castai-agent"
-	ConfigMapName          = "castai-tsc-controller-config"
-	LeaderElectionLockName = "castai-tsc-controller-leader"
-	AnnotationBypass       = "workloads.cast.ai/tsc-bypass"
-	AnnotationMaxSkew      = "workloads.cast.ai/tsc-maxSkew"
-	AnnotationTopologyKey  = "workloads.cast.ai/tsc-topologyKey"
-	AnnotationWhenUnsat    = "workloads.cast.ai/tsc-whenUnsatisfiable"
-	AnnotationConstraints  = "workloads.cast.ai/tsc-constraints"
-	ManagedByLabel         = "cast.ai/managed-by"
-	ManagedByValue         = "tsc-controller"
+	ControllerName          = "castai-tsc-controller"
+	ConfigMapNamespace      = "castai-agent"
+	ConfigMapName           = "castai-tsc-controller-config"
+	LeaderElectionLockName  = "castai-tsc-controller-leader"
+	AnnotationBypass        = "workloads.cast.ai/tsc-bypass"
+	AnnotationMaxSkew       = "workloads.cast.ai/tsc-maxSkew"
+	AnnotationTopologyKey   = "workloads.cast.ai/tsc-topologyKey"
+	AnnotationWhenUnsat     = "workloads.cast.ai/tsc-whenUnsatisfiable"
+	AnnotationConstraints   = "workloads.cast.ai/tsc-constraints"
+	ManagedByLabel          = "cast.ai/managed-by"
+	ManagedByValue          = "tsc-controller"
+	AnnotationTSCManaged    = "workloads.cast.ai/tsc-managed"
+	TSCControllerFinalizer  = "workloads.cast.ai/castai-tsc-controller-finalizer"
 )
 
 var (
@@ -53,6 +62,7 @@ var (
 	configNamespace string
 
 	clientset        *kubernetes.Clientset
+	workloadsClient  workloadsclient.WorkloadsV1Interface
 	recorder         record.EventRecorder
 	config           *TSCConfig
 	configLock       sync.RWMutex
@@ -60,16 +70,10 @@ var (
 	rulesLock        sync.RWMutex
 	processedWorkloads = make(map[string]bool)
 	workloadsLock    sync.Mutex
-)
 
-type TSCConfig struct {
-	DefaultConstraints     []corev1.TopologySpreadConstraint `json:"defaultConstraints"`
-	LogInterval            time.Duration                     `json:"logInterval"`
-	ReconcileInterval      time.Duration                     `json:"reconcileInterval"`
-	GarbageCollectInterval time.Duration                     `json:"garbageCollectInterval"`
-	DryRun                 bool                              `json:"dryRun"`
-	EnableTSCManagement    bool                              `json:"enableTSCManagement"`
-}
+	tscClient   *snapshot.TSCClient
+	tscAccessor *snapshot.Accessor[*workloadsv1.TSCOriginal]
+)
 
 type ExclusionRule struct {
 	NamespaceRegex string            `json:"namespaceRegex"`
@@ -102,6 +106,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create workloads typed client (for TSCOriginal snapshots).
+	workloadsClient = workloadsclient.NewForConfigOrDie(cfg)
+
 	// Create event recorder
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(klog.Infof)
@@ -112,8 +119,12 @@ func main() {
 		Component: ControllerName,
 	})
 
-	// Load initial config
+	// Load initial config (so we know the operator namespace before wiring snapshot client).
 	loadConfig()
+
+	// Wire snapshot clients now that we know the operator namespace.
+	tscClient = snapshot.NewTSCClientFromClient(workloadsClient, config.OperatorNamespace)
+	tscAccessor = snapshot.NewTSCAccessor()
 
 	// Setup signal handling
 	sigCh := make(chan os.Signal, 1)
@@ -154,6 +165,10 @@ func main() {
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
 				logAlways("Started leading")
+				// Reconcile orphaned snapshots before the controller loop kicks in.
+				if err := reconcileOrphanedSnapshots(ctx); err != nil {
+					logError("orphan-reconcile", "Startup orphan reconcile had errors: %v", err)
+				}
 				runController(ctx)
 			},
 			OnStoppedLeading: func() {
@@ -179,85 +194,49 @@ func buildConfig() (*rest.Config, error) {
 	return rest.InClusterConfig()
 }
 
+// loadConfig reads the controller ConfigMap and produces a *TSCConfig via
+// ParseTSCConfig. The previous version of this function hand-rolled the
+// defaults and parsing; that responsibility now lives in configmap.go so the
+// parser can be unit-tested in isolation.
 func loadConfig() {
-	// Load from ConfigMap or use defaults
 	configLock.Lock()
 	defer configLock.Unlock()
 
-	// Read ENABLE_TSC_MANAGEMENT from env (allows disabling without ConfigMap change)
-	enableTSCManagement := true
-	if envVal := os.Getenv("ENABLE_TSC_MANAGEMENT"); envVal != "" {
-		enableTSCManagement = envVal == "true"
-	}
-
-	config = &TSCConfig{
-		DefaultConstraints: []corev1.TopologySpreadConstraint{
-			{
-				MaxSkew:           1,
-				TopologyKey:       "topology.kubernetes.io/zone",
-				WhenUnsatisfiable: corev1.DoNotSchedule,
-			},
-		},
-		LogInterval:            15 * time.Minute,
-		ReconcileInterval:      2 * time.Minute,
-		GarbageCollectInterval: 5 * time.Minute,
-		DryRun:                 true, // SAFETY: Default to dry-run mode
-		EnableTSCManagement:    enableTSCManagement, // Default to enabled
-	}
-
-	// Try to load from ConfigMap
 	cm, err := clientset.CoreV1().ConfigMaps(configNamespace).Get(
 		context.Background(), ConfigMapName, metav1.GetOptions{},
 	)
-	if err != nil {
+	if err != nil && !apierrors.IsNotFound(err) {
 		logWarn("config-load", "Failed to load ConfigMap, using defaults: %v", err)
-		return
 	}
 
-	// Parse default constraints
-	if constraintsJSON, ok := cm.Data["defaultConstraints"]; ok {
-		var constraints []corev1.TopologySpreadConstraint
-		if err := json.Unmarshal([]byte(constraintsJSON), &constraints); err == nil {
-			config.DefaultConstraints = constraints
+	envVersion := os.Getenv("OPERATOR_VERSION")
+	newCfg, parseErrs := ParseTSCConfig(cm, envVersion)
+	for _, e := range parseErrs {
+		logWarn("config-parse", "ConfigMap field error: %v", e)
+	}
+
+	// Exclusion rules are not part of TSCConfig; parse them here so they keep
+	// their own lock and stay in sync with the previous behaviour.
+	if cm != nil {
+		if exclusionsJSON, ok := cm.Data["exclusions"]; ok {
+			var rules []ExclusionRule
+			if err := json.Unmarshal([]byte(exclusionsJSON), &rules); err == nil {
+				rulesLock.Lock()
+				exclusionRules = rules
+				rulesLock.Unlock()
+			}
 		}
 	}
 
-	// Parse intervals
-	if logIntv, ok := cm.Data["logInterval"]; ok {
-		if d, err := time.ParseDuration(logIntv); err == nil {
-			config.LogInterval = d
-			SetLogInterval(d)
-		}
+	config = newCfg
+
+	// Re-wire the snapshot client if the operator namespace changed.
+	if tscClient != nil {
+		tscClient = snapshot.NewTSCClientFromClient(workloadsClient, config.OperatorNamespace)
 	}
 
-	if recIntv, ok := cm.Data["reconcileInterval"]; ok {
-		if d, err := time.ParseDuration(recIntv); err == nil {
-			config.ReconcileInterval = d
-		}
-	}
-
-	if gcIntv, ok := cm.Data["garbageCollectInterval"]; ok {
-		if d, err := time.ParseDuration(gcIntv); err == nil {
-			config.GarbageCollectInterval = d
-		}
-	}
-
-	// Parse exclusion rules
-	if exclusionsJSON, ok := cm.Data["exclusions"]; ok {
-		var rules []ExclusionRule
-		if err := json.Unmarshal([]byte(exclusionsJSON), &rules); err == nil {
-			rulesLock.Lock()
-			exclusionRules = rules
-			rulesLock.Unlock()
-		}
-	}
-
-	// SAFETY: Parse dry-run mode (default: true for safety)
-	if dryRunStr, ok := cm.Data["dryRun"]; ok {
-		config.DryRun = dryRunStr != "false"
-	}
-
-	logInfo("config-loaded", "Configuration loaded successfully")
+	logInfo("config-loaded", "Configuration loaded successfully (mgmt=%v rollback=%v mode=%s snapshot=%v ns=%s)",
+		config.ManagementEnabled, config.RollbackOnDisable, config.Mode, config.SnapshotEnabled, config.OperatorNamespace)
 }
 
 func runController(ctx context.Context) {
@@ -268,26 +247,29 @@ func runController(ctx context.Context) {
 	statefulSetInformer := factory.Apps().V1().StatefulSets().Informer()
 	configMapInformer := factory.Core().V1().ConfigMaps().Informer()
 
+	// Track previous RollbackState to detect true→false transitions.
+	var prevStateMu sync.Mutex
+	var prevState RollbackState
+
 	// Add handlers for Deployments
 	deploymentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			if d, ok := obj.(*appv1.Deployment); ok {
-				// SAFETY: Guard against nil Replicas pointer
+			if d, ok := obj.(*appsv1.Deployment); ok {
 				replicas := 1
 				if d.Spec.Replicas != nil {
 					replicas = int(*d.Spec.Replicas)
 				}
-				createTSCForWorkload(ctx, "Deployment", d.Namespace, d.Name, d.Annotations, d.Spec.Template.Labels, replicas)
+				createTSCForWorkload(ctx, "Deployment", d.Namespace, d.Name, d.Annotations, d.Spec.Template.Labels, replicas, d.UID)
 			}
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			if d, ok := newObj.(*appv1.Deployment); ok {
-				oldD, _ := oldObj.(*appv1.Deployment)
+			if d, ok := newObj.(*appsv1.Deployment); ok {
+				oldD, _ := oldObj.(*appsv1.Deployment)
 				handleWorkloadUpdate(ctx, "Deployment", d, oldD)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
-			if d, ok := obj.(*appv1.Deployment); ok {
+			if d, ok := obj.(*appsv1.Deployment); ok {
 				deleteTSCForWorkload(d.Namespace, d.Name)
 			}
 		},
@@ -296,23 +278,22 @@ func runController(ctx context.Context) {
 	// Add handlers for StatefulSets
 	statefulSetInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			if s, ok := obj.(*appv1.StatefulSet); ok {
-				// SAFETY: Guard against nil Replicas pointer
+			if s, ok := obj.(*appsv1.StatefulSet); ok {
 				replicas := 1
 				if s.Spec.Replicas != nil {
 					replicas = int(*s.Spec.Replicas)
 				}
-				createTSCForWorkload(ctx, "StatefulSet", s.Namespace, s.Name, s.Annotations, s.Spec.Template.Labels, replicas)
+				createTSCForWorkload(ctx, "StatefulSet", s.Namespace, s.Name, s.Annotations, s.Spec.Template.Labels, replicas, s.UID)
 			}
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			if s, ok := newObj.(*appv1.StatefulSet); ok {
-				oldS, _ := oldObj.(*appv1.StatefulSet)
+			if s, ok := newObj.(*appsv1.StatefulSet); ok {
+				oldS, _ := oldObj.(*appsv1.StatefulSet)
 				handleWorkloadUpdate(ctx, "StatefulSet", s, oldS)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
-			if s, ok := obj.(*appv1.StatefulSet); ok {
+			if s, ok := obj.(*appsv1.StatefulSet); ok {
 				deleteTSCForWorkload(s.Namespace, s.Name)
 			}
 		},
@@ -321,37 +302,253 @@ func runController(ctx context.Context) {
 	// Watch ConfigMap for changes
 	configMapInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			if cm, ok := obj.(*corev1.ConfigMap); ok && cm.Name == ConfigMapName {
-				logInfo("configmap-add", "ConfigMap added, reloading config")
-				loadConfig()
+			cm, ok := obj.(*corev1.ConfigMap)
+			if !ok || cm.Name != ConfigMapName {
+				return
 			}
+			logInfo("configmap-add", "ConfigMap added, reloading config")
+			prevStateMu.Lock()
+			oldState := prevState
+			prevStateMu.Unlock()
+			loadConfig()
+			newState := currentRollbackState()
+			prevStateMu.Lock()
+			prevState = newState
+			prevStateMu.Unlock()
+			maybeTriggerRollback(ctx, oldState, newState)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			if cm, ok := newObj.(*corev1.ConfigMap); ok && cm.Name == ConfigMapName {
-				logInfo("configmap-update", "ConfigMap updated, reloading config")
-				loadConfig()
+			cm, ok := newObj.(*corev1.ConfigMap)
+			if !ok || cm.Name != ConfigMapName {
+				return
 			}
+			// Capture pre-update state from in-memory config (since loadConfig
+			// hasn't run yet).
+			prevStateMu.Lock()
+			oldState := prevState
+			prevStateMu.Unlock()
+			logInfo("configmap-update", "ConfigMap updated, reloading config")
+			loadConfig()
+			newState := currentRollbackState()
+			prevStateMu.Lock()
+			prevState = newState
+			prevStateMu.Unlock()
+			maybeTriggerRollback(ctx, oldState, newState)
 		},
 	})
 
 	factory.Start(ctx.Done())
 	factory.WaitForCacheSync(ctx.Done())
 
+	// Seed prevState after cache sync so we can detect future transitions.
+	prevStateMu.Lock()
+	prevState = currentRollbackState()
+	prevStateMu.Unlock()
+
 	logAlways("Controller started. Watching Deployments and StatefulSets...")
 
-	// Start reconciliation loop
 	go runReconcileLoop(ctx)
-
-	// Start garbage collection
 	go runGarbageCollection(ctx)
 
 	<-ctx.Done()
 }
 
-func createTSCForWorkload(ctx context.Context, kind, namespace, name string, annotations, labels map[string]string, replicas int) {
+func currentRollbackState() RollbackState {
+	configLock.RLock()
+	defer configLock.RUnlock()
+	if config == nil {
+		return RollbackState{}
+	}
+	return config.StateOf()
+}
+
+func maybeTriggerRollback(ctx context.Context, oldState, newState RollbackState) {
+	if oldState.ManagementEnabled && !newState.ManagementEnabled && newState.RollbackOnDisable {
+		logInfo("rollback-trigger", "managementEnabled went true→false; triggering rollback asynchronously")
+		go runRollback(ctx)
+	}
+}
+
+func runRollback(ctx context.Context) {
+	logger := snapshot.SimpleLogger{Info: logInfoSimple, Warn: logWarnSimple, Error: logErrorSimple}
+	ns := config.OperatorNamespace
+	if err := snapshot.Rollback(ctx,
+		tscClient,
+		*tscAccessor,
+		logger,
+		ns,
+		snapshot.FinalizerName(ControllerName),
+		tscInverseFn(clientset),
+		func(ctx context.Context, snap *workloadsv1.TSCOriginal) error {
+			return applyInversePatch(ctx, clientset, snap)
+		},
+	); err != nil {
+		logError("rollback", "Rollback loop had errors: %v", err)
+	}
+}
+
+// captureTSCOriginal captures the pre-castai topology spread constraints for a
+// workload, if snapshotting is enabled and the workload is not yet managed.
+// Skips capture when the CRD is missing from the cluster.
+func captureTSCOriginal(ctx context.Context, kind, namespace, name string, obj metav1.Object, currentTSCs []corev1.TopologySpreadConstraint) {
+	configLock.RLock()
+	enabled := config.SnapshotEnabled
+	controllerVersion := config.Version
+	configLock.RUnlock()
+
+	if !enabled {
+		return
+	}
+
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+
+	// Honor existing managed annotation (idempotent re-runs).
+	if annotations[AnnotationTSCManaged] == "true" {
+		return
+	}
+
+	// Honor user-set bypass.
+	if annotations[AnnotationBypass] == "true" {
+		return
+	}
+
+	identity := snapshot.WorkloadIdentity{
+		APIVersion:  "apps/v1",
+		Kind:        kind,
+		Namespace:   namespace,
+		Name:        name,
+		UID:         obj.GetUID(),
+		Generation:  obj.GetGeneration(),
+		Annotations: annotations,
+	}
+
+	originalPresent := currentTSCs != nil
+	original := currentTSCs
+	if !originalPresent {
+		original = []corev1.TopologySpreadConstraint{}
+	}
+
+	newFn := func(id snapshot.WorkloadIdentity) (*workloadsv1.TSCOriginal, error) {
+		crdName := snapshot.CollisionSafeName(id.Kind, id.Namespace, id.Name, id.UID)
+		return &workloadsv1.TSCOriginal{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      crdName,
+				Namespace: id.Namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": ControllerName,
+				},
+			},
+			Spec: workloadsv1.TSCOriginalSpec{
+				TargetRef: workloadsv1.TargetRef{
+					APIVersion: id.APIVersion,
+					Kind:       id.Kind,
+					Namespace:  id.Namespace,
+					Name:       id.Name,
+					UID:        id.UID,
+				},
+				OriginalTSCs:        original,
+				OriginalTSCsPresent: originalPresent,
+				CapturedAt:          metav1.Now(),
+				ControllerVersion:   controllerVersion,
+			},
+		}, nil
+	}
+
+	logger := snapshot.SimpleLogger{Info: logInfoSimple, Warn: logWarnSimple, Error: logErrorSimple}
+	if err := snapshot.CaptureIfAbsent(ctx,
+		tscClient, *tscAccessor, logger,
+		config.OperatorNamespace,
+		snapshot.FinalizerName(ControllerName),
+		ControllerName,
+		identity, newFn,
+	); err != nil {
+		logError("capture", "Capture failed for %s/%s/%s: %v", kind, namespace, name, err)
+	}
+}
+
+// removeSnapshotFinalizer removes the tsc-controller finalizer from any
+// TSCOriginal snapshot owned by this workload, so the workload can be deleted.
+func removeSnapshotFinalizer(ctx context.Context, namespace, name string, uid types.UID) {
+	if tscClient == nil || workloadsClient == nil {
+		return
+	}
+	list, err := workloadsClient.TSCOriginals(config.OperatorNamespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		logWarn("snapshot-list", "Failed to list snapshots: %v", err)
+		return
+	}
+	for i := range list.Items {
+		snap := &list.Items[i]
+		if snap.Spec.TargetRef.Namespace != namespace ||
+			snap.Spec.TargetRef.Name != name ||
+			snap.Spec.TargetRef.UID != uid {
+			continue
+		}
+		if err := snapshot.RemoveFinalizer(ctx, tscClient, *tscAccessor,
+			config.OperatorNamespace, snap.Name, snapshot.FinalizerName(ControllerName)); err != nil {
+			logWarn("snapshot-finalizer", "Failed to remove finalizer from %s: %v", snap.Name, err)
+		}
+	}
+}
+
+// reconcileOrphanedSnapshots removes the finalizer (and therefore allows
+// deletion) of any TSCOriginal whose target workload is missing or has a
+// different UID. Called at controller startup.
+func reconcileOrphanedSnapshots(ctx context.Context) error {
+	if tscClient == nil {
+		return nil
+	}
+	ns := config.OperatorNamespace
+	list, err := tscClient.List(ctx, ns)
+	if err != nil {
+		return fmt.Errorf("list snapshots: %w", err)
+	}
+	for _, snap := range list {
+		ref := snap.Spec.TargetRef
+		// Already rolled back, leave alone.
+		conds := tscAccessor.GetConditions(snap)
+		if snapshot.IsRolledBack(conds) {
+			continue
+		}
+		gone, err := targetGone(ctx, ref)
+		if err != nil {
+			logWarn("orphan-lookup", "Failed to lookup %s/%s/%s: %v", ref.Kind, ref.Namespace, ref.Name, err)
+			continue
+		}
+		if gone {
+			if err := snapshot.RemoveFinalizer(ctx, tscClient, *tscAccessor, ns, snap.Name, snapshot.FinalizerName(ControllerName)); err != nil {
+				logWarn("orphan-finalizer", "Failed to remove finalizer from %s: %v", snap.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
+func targetGone(ctx context.Context, ref workloadsv1.TargetRef) (bool, error) {
+	var err error
+	switch ref.Kind {
+	case "Deployment":
+		_, err = clientset.AppsV1().Deployments(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	case "StatefulSet":
+		_, err = clientset.AppsV1().StatefulSets(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+	default:
+		return true, nil
+	}
+	if apierrors.IsNotFound(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func createTSCForWorkload(ctx context.Context, kind, namespace, name string, annotations, labels map[string]string, replicas int, uid types.UID) {
 	key := fmt.Sprintf("%s/%s/%s", kind, namespace, name)
 
-	// Check if already processed
 	workloadsLock.Lock()
 	if processedWorkloads[key] {
 		workloadsLock.Unlock()
@@ -359,7 +556,6 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 	}
 	workloadsLock.Unlock()
 
-	// Check bypass annotation
 	if annotations != nil {
 		if val, ok := annotations[AnnotationBypass]; ok && val == "true" {
 			logDebug("tsc-bypass", "Skipping %s, bypass annotation present", key)
@@ -367,43 +563,70 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 		}
 	}
 
-	// Check exclusion rules
 	if isExcluded(namespace, name, labels) {
 		logDebug("tsc-excluded", "Skipping %s, excluded by rule", key)
 		return
 	}
 
-	// Skip if replicas < 2
 	if replicas < 2 {
 		logDebug("tsc-low-replicas", "Skipping %s, replicas < 2", key)
 		return
 	}
 
-	// Read config under lock once to avoid data race
 	configLock.RLock()
-	enableTSCMgmt := config.EnableTSCManagement
+	managementEnabled := config.ManagementEnabled
+	mode := config.Mode
 	dryRun := config.DryRun
 	configLock.RUnlock()
 
-	// Check if TSC management is enabled
-	if !enableTSCMgmt {
-		logDebug("tsc-disabled", "Skipping %s, TSC management disabled via ENABLE_TSC_MANAGEMENT", key)
+	if !managementEnabled {
+		logDebug("tsc-disabled", "Skipping %s, management disabled", key)
 		return
 	}
 
-	// Build constraints
 	constraints := buildConstraints(namespace, name, annotations, labels)
 	if len(constraints) == 0 {
 		return
 	}
 
-	if dryRun {
-		logInfo("tsc-dry-run", "[DRY-RUN] Would add %d TSC(s) to %s", len(constraints), key)
-		// Don't mark as processed in dry-run so it will be re-evaluated when dryRun is disabled
+	// Capture snapshot before patching (unless in recommend mode or snapshot disabled).
+	if mode != ModeRecommend {
+		// Look up live object to capture original TSCs.
+		var current []corev1.TopologySpreadConstraint
+		var currentPresent bool
+		switch kind {
+		case "Deployment":
+			d, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+			if err == nil {
+				current = d.Spec.Template.Spec.TopologySpreadConstraints
+				currentPresent = d.Spec.Template.Spec.TopologySpreadConstraints != nil
+				if current == nil {
+					current = nil
+				}
+			}
+		case "StatefulSet":
+			s, err := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+			if err == nil {
+				current = s.Spec.Template.Spec.TopologySpreadConstraints
+				currentPresent = s.Spec.Template.Spec.TopologySpreadConstraints != nil
+				if current == nil {
+					current = nil
+				}
+			}
+		}
+		captureTSCOriginalWithCurrent(ctx, kind, namespace, name, annotations, uid, current, currentPresent)
+	}
+
+	if mode == ModeRecommend {
+		logInfo("tsc-recommend", "[RECOMMEND] Would add %d TSC(s) to %s", len(constraints), key)
 		return
 	}
 
-	// SAFETY: Check if TSC already exists and matches desired state
+	if dryRun {
+		logInfo("tsc-dry-run", "[DRY-RUN] Would add %d TSC(s) to %s", len(constraints), key)
+		return
+	}
+
 	needsPatch := false
 	switch kind {
 	case "Deployment":
@@ -430,7 +653,6 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 		return
 	}
 
-	// Apply patch based on kind
 	var err error
 	switch kind {
 	case "Deployment":
@@ -449,6 +671,11 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 		return
 	}
 
+	// Mark workload as managed so subsequent reconciles skip capture.
+	if err := markWorkloadManaged(ctx, kind, namespace, name); err != nil {
+		logWarn("tsc-managed-annot", "Failed to set managed annotation on %s: %v", key, err)
+	}
+
 	workloadsLock.Lock()
 	processedWorkloads[key] = true
 	workloadsLock.Unlock()
@@ -461,8 +688,92 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 	}, corev1.EventTypeNormal, "TSCAdded", "Topology spread constraints added")
 }
 
+// captureTSCOriginalWithCurrent is the inner capture helper that takes an
+// already-fetched "current TSCs" list and Present flag.
+func captureTSCOriginalWithCurrent(ctx context.Context, kind, namespace, name string, annotations map[string]string, uid types.UID, current []corev1.TopologySpreadConstraint, present bool) {
+	configLock.RLock()
+	enabled := config.SnapshotEnabled
+	controllerVersion := config.Version
+	configLock.RUnlock()
+
+	if !enabled {
+		return
+	}
+	if annotations[AnnotationTSCManaged] == "true" {
+		return
+	}
+
+	identity := snapshot.WorkloadIdentity{
+		APIVersion:  "apps/v1",
+		Kind:        kind,
+		Namespace:   namespace,
+		Name:        name,
+		UID:         uid,
+		Annotations: annotations,
+	}
+
+	newFn := func(id snapshot.WorkloadIdentity) (*workloadsv1.TSCOriginal, error) {
+		crdName := snapshot.CollisionSafeName(id.Kind, id.Namespace, id.Name, id.UID)
+		return &workloadsv1.TSCOriginal{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      crdName,
+				Namespace: id.Namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": ControllerName,
+				},
+			},
+			Spec: workloadsv1.TSCOriginalSpec{
+				TargetRef: workloadsv1.TargetRef{
+					APIVersion: id.APIVersion,
+					Kind:       id.Kind,
+					Namespace:  id.Namespace,
+					Name:       id.Name,
+					UID:        id.UID,
+				},
+				OriginalTSCs:        current,
+				OriginalTSCsPresent: present,
+				CapturedAt:          metav1.Now(),
+				ControllerVersion:   controllerVersion,
+			},
+		}, nil
+	}
+
+	logger := snapshot.SimpleLogger{Info: logInfoSimple, Warn: logWarnSimple, Error: logErrorSimple}
+	if err := snapshot.CaptureIfAbsent(ctx,
+		tscClient, *tscAccessor, logger,
+		config.OperatorNamespace,
+		snapshot.FinalizerName(ControllerName),
+		ControllerName,
+		identity, newFn,
+	); err != nil {
+		logError("capture", "Capture failed for %s/%s/%s: %v", kind, namespace, name, err)
+	}
+}
+
+// markWorkloadManaged sets the workloads.cast.ai/tsc-managed=true annotation
+// on the workload using a Strategic Merge Patch that merges annotations.
+func markWorkloadManaged(ctx context.Context, kind, namespace, name string) error {
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": map[string]interface{}{
+				AnnotationTSCManaged: "true",
+			},
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case "Deployment":
+		_, err = clientset.AppsV1().Deployments(namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+	case "StatefulSet":
+		_, err = clientset.AppsV1().StatefulSets(namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+	}
+	return err
+}
+
 // topologySpreadConstraintsMatch checks if existing TSCs match the desired constraints
-// Prevents unnecessary rolling restarts when TSC is already configured correctly
 func topologySpreadConstraintsMatch(existing, desired []corev1.TopologySpreadConstraint) bool {
 	if len(existing) != len(desired) {
 		return false
@@ -493,7 +804,6 @@ func buildConstraints(namespace, name string, annotations, labels map[string]str
 	configLock.RLock()
 	defer configLock.RUnlock()
 
-	// Check for full constraints override
 	if annotations != nil {
 		if overrideJSON, ok := annotations[AnnotationConstraints]; ok {
 			var override []corev1.TopologySpreadConstraint
@@ -502,7 +812,6 @@ func buildConstraints(namespace, name string, annotations, labels map[string]str
 			}
 		}
 
-		// Individual overrides
 		maxSkew := 1
 		topologyKey := "topology.kubernetes.io/zone"
 		whenUnsatisfiable := corev1.DoNotSchedule
@@ -533,7 +842,6 @@ func buildConstraints(namespace, name string, annotations, labels map[string]str
 		}
 	}
 
-	// Use defaults with workload-specific selector
 	constraints := make([]corev1.TopologySpreadConstraint, len(config.DefaultConstraints))
 	for i, c := range config.DefaultConstraints {
 		constraints[i] = c
@@ -594,16 +902,16 @@ func patchStatefulSetTSC(ctx context.Context, namespace, name string, constraint
 func handleWorkloadUpdate(ctx context.Context, kind string, newObj, oldObj metav1.Object) {
 	namespace := newObj.GetNamespace()
 	name := newObj.GetName()
+	uid := newObj.GetUID()
 	key := fmt.Sprintf("%s/%s/%s", kind, namespace, name)
 
 	newAnnotations := newObj.GetAnnotations()
 	oldAnnotations := oldObj.GetAnnotations()
 
-	// Check if bypass was added
 	if oldAnnotations == nil || oldAnnotations[AnnotationBypass] != "true" {
 		if newAnnotations != nil && newAnnotations[AnnotationBypass] == "true" {
-			// Remove TSC
 			removeTSCFromWorkload(ctx, kind, namespace, name)
+			removeSnapshotFinalizer(ctx, namespace, name, uid)
 			workloadsLock.Lock()
 			delete(processedWorkloads, key)
 			workloadsLock.Unlock()
@@ -611,10 +919,8 @@ func handleWorkloadUpdate(ctx context.Context, kind string, newObj, oldObj metav
 		}
 	}
 
-	// Check if bypass was removed
 	if oldAnnotations != nil && oldAnnotations[AnnotationBypass] == "true" {
 		if newAnnotations == nil || newAnnotations[AnnotationBypass] != "true" {
-			// Re-process
 			workloadsLock.Lock()
 			delete(processedWorkloads, key)
 			workloadsLock.Unlock()
@@ -674,23 +980,18 @@ func isExcluded(namespace, name string, labels map[string]string) bool {
 	defer rulesLock.RUnlock()
 
 	for _, rule := range exclusionRules {
-		// Check namespace regex
 		if rule.NamespaceRegex != "" {
 			matched, _ := regexp.MatchString(rule.NamespaceRegex, namespace)
 			if !matched {
 				continue
 			}
 		}
-
-		// Check name regex
 		if rule.NameRegex != "" {
 			matched, _ := regexp.MatchString(rule.NameRegex, name)
 			if !matched {
 				continue
 			}
 		}
-
-		// Check labels
 		if len(rule.Labels) > 0 {
 			allMatch := true
 			for k, v := range rule.Labels {
@@ -703,7 +1004,6 @@ func isExcluded(namespace, name string, labels map[string]string) bool {
 				continue
 			}
 		}
-
 		return true
 	}
 
@@ -731,10 +1031,6 @@ func runReconcileLoop(ctx context.Context) {
 func reconcileAllWorkloads(ctx context.Context) {
 	logInfo("reconcile-start", "Starting full reconciliation")
 
-	// SAFETY: Don't clear processed cache - createTSCForWorkload now uses
-	// idempotent checks to avoid unnecessary rolling restarts
-
-	// List all deployments
 	deployments, err := clientset.AppsV1().Deployments("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		logError("reconcile-deployments", "Failed to list deployments: %v", err)
@@ -742,12 +1038,11 @@ func reconcileAllWorkloads(ctx context.Context) {
 		for _, d := range deployments.Items {
 			if d.Spec.Replicas != nil && *d.Spec.Replicas >= 2 {
 				createTSCForWorkload(ctx, "Deployment", d.Namespace, d.Name,
-					d.Annotations, d.Spec.Template.Labels, int(*d.Spec.Replicas))
+					d.Annotations, d.Spec.Template.Labels, int(*d.Spec.Replicas), d.UID)
 			}
 		}
 	}
 
-	// List all statefulsets
 	statefulsets, err := clientset.AppsV1().StatefulSets("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		logError("reconcile-statefulsets", "Failed to list statefulsets: %v", err)
@@ -755,7 +1050,7 @@ func reconcileAllWorkloads(ctx context.Context) {
 		for _, s := range statefulsets.Items {
 			if s.Spec.Replicas != nil && *s.Spec.Replicas >= 2 {
 				createTSCForWorkload(ctx, "StatefulSet", s.Namespace, s.Name,
-					s.Annotations, s.Spec.Template.Labels, int(*s.Spec.Replicas))
+					s.Annotations, s.Spec.Template.Labels, int(*s.Spec.Replicas), s.UID)
 			}
 		}
 	}
@@ -784,7 +1079,6 @@ func runGarbageCollection(ctx context.Context) {
 func garbageCollectOrphanedTSCs(ctx context.Context) {
 	logDebug("gc-start", "Starting garbage collection")
 
-	// Check deployments
 	deployments, err := clientset.AppsV1().Deployments("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return
@@ -794,8 +1088,6 @@ func garbageCollectOrphanedTSCs(ctx context.Context) {
 		if d.Spec.Template.Spec.TopologySpreadConstraints == nil {
 			continue
 		}
-
-		// Check if has managed TSC
 		hasManaged := false
 		for _, c := range d.Spec.Template.Spec.TopologySpreadConstraints {
 			if c.LabelSelector != nil && c.LabelSelector.MatchLabels != nil {
@@ -805,14 +1097,11 @@ func garbageCollectOrphanedTSCs(ctx context.Context) {
 				}
 			}
 		}
-
 		if hasManaged && (d.Spec.Replicas == nil || *d.Spec.Replicas < 2) {
-			// Remove TSC
 			removeTSCFromWorkload(ctx, "Deployment", d.Namespace, d.Name)
 		}
 	}
 
-	// Check statefulsets
 	statefulsets, err := clientset.AppsV1().StatefulSets("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return
@@ -822,7 +1111,6 @@ func garbageCollectOrphanedTSCs(ctx context.Context) {
 		if s.Spec.Template.Spec.TopologySpreadConstraints == nil {
 			continue
 		}
-
 		hasManaged := false
 		for _, c := range s.Spec.Template.Spec.TopologySpreadConstraints {
 			if c.LabelSelector != nil && c.LabelSelector.MatchLabels != nil {
@@ -832,7 +1120,6 @@ func garbageCollectOrphanedTSCs(ctx context.Context) {
 				}
 			}
 		}
-
 		if hasManaged && (s.Spec.Replicas == nil || *s.Spec.Replicas < 2) {
 			removeTSCFromWorkload(ctx, "StatefulSet", s.Namespace, s.Name)
 		}
@@ -841,3 +1128,8 @@ func garbageCollectOrphanedTSCs(ctx context.Context) {
 	logDebug("gc-complete", "Garbage collection complete")
 }
 
+// Adapter wrappers so snapshot.SimpleLogger can consume this controller's
+// rate-limited log helpers (which take a key as the first argument).
+func logInfoSimple(format string, args ...interface{})  { logInfo("tsc-snapshot", format, args...) }
+func logWarnSimple(format string, args ...interface{})  { logWarn("tsc-snapshot", format, args...) }
+func logErrorSimple(format string, args ...interface{}) { logError("tsc-snapshot", format, args...) }

@@ -14,48 +14,55 @@ import (
 	workloadsclient "github.com/castai/castai-guardrails-controllers/clientset/versioned/typed/workloads/v1"
 )
 
-// TSCClient implements Client[*workloadsv1.TSCOriginal] over a typed REST clientset.
-// All methods pass through the namespace argument to the underlying clientset.
+// TSCClient implements Client[*workloadsv1.TSCOriginal] over a typed REST
+// clientset. The client is bound to a single namespace at construction time.
 type TSCClient struct {
-	client workloadsclient.WorkloadsV1Interface
+	inner workloadsclient.TSCOriginalInterface
 }
 
-// NewTSCClient builds a TSCClient from a REST config.
-func NewTSCClient(restConfig *rest.Config) (*TSCClient, error) {
+// NewTSCClient builds a TSCClient from a REST config and a namespace.
+func NewTSCClient(restConfig *rest.Config, namespace string) (*TSCClient, error) {
 	c, err := workloadsclient.NewForConfig(restConfig)
 	if err != nil {
 		return nil, err
 	}
-	return &TSCClient{client: c}, nil
+	return &TSCClient{inner: c.TSCOriginals(namespace)}, nil
+}
+
+// NewTSCClientFromClient builds a TSCClient from a typed WorkloadsV1 client
+// and a namespace. Used by controllers that already constructed the typed
+// clientset (e.g. via versioned.NewForConfigOrDie).
+func NewTSCClientFromClient(c workloadsclient.WorkloadsV1Interface, namespace string) *TSCClient {
+	return &TSCClient{inner: c.TSCOriginals(namespace)}
 }
 
 // NewTSCClientFromInterface is a test-friendly constructor.
-func NewTSCClientFromInterface(i workloadsclient.WorkloadsV1Interface) *TSCClient {
-	return &TSCClient{client: i}
+func NewTSCClientFromInterface(i workloadsclient.TSCOriginalInterface) *TSCClient {
+	return &TSCClient{inner: i}
 }
 
-func (c *TSCClient) Get(ctx context.Context, namespace, name string) (*workloadsv1.TSCOriginal, error) {
-	return c.client.TSCOriginals(namespace).Get(ctx, name, metav1.GetOptions{})
+func (c *TSCClient) Get(ctx context.Context, _, name string) (*workloadsv1.TSCOriginal, error) {
+	return c.inner.Get(ctx, name, metav1.GetOptions{})
 }
 
-func (c *TSCClient) Create(ctx context.Context, namespace string, obj *workloadsv1.TSCOriginal) (*workloadsv1.TSCOriginal, error) {
-	return c.client.TSCOriginals(namespace).Create(ctx, obj, metav1.CreateOptions{})
+func (c *TSCClient) Create(ctx context.Context, _ string, obj *workloadsv1.TSCOriginal) (*workloadsv1.TSCOriginal, error) {
+	return c.inner.Create(ctx, obj, metav1.CreateOptions{})
 }
 
-func (c *TSCClient) Update(ctx context.Context, namespace string, obj *workloadsv1.TSCOriginal) (*workloadsv1.TSCOriginal, error) {
-	return c.client.TSCOriginals(namespace).Update(ctx, obj, metav1.UpdateOptions{})
+func (c *TSCClient) Update(ctx context.Context, _ string, obj *workloadsv1.TSCOriginal) (*workloadsv1.TSCOriginal, error) {
+	return c.inner.Update(ctx, obj, metav1.UpdateOptions{})
 }
 
-func (c *TSCClient) UpdateStatus(ctx context.Context, namespace string, obj *workloadsv1.TSCOriginal) (*workloadsv1.TSCOriginal, error) {
-	return c.client.TSCOriginals(namespace).UpdateStatus(ctx, obj, metav1.UpdateOptions{})
+func (c *TSCClient) UpdateStatus(ctx context.Context, _ string, obj *workloadsv1.TSCOriginal) (*workloadsv1.TSCOriginal, error) {
+	return c.inner.UpdateStatus(ctx, obj, metav1.UpdateOptions{})
 }
 
-func (c *TSCClient) Delete(ctx context.Context, namespace, name string) error {
-	return c.client.TSCOriginals(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+func (c *TSCClient) Delete(ctx context.Context, _, name string) error {
+	return c.inner.Delete(ctx, name, metav1.DeleteOptions{})
 }
 
-func (c *TSCClient) List(ctx context.Context, namespace string) ([]*workloadsv1.TSCOriginal, error) {
-	l, err := c.client.TSCOriginals(namespace).List(ctx, metav1.ListOptions{})
+func (c *TSCClient) List(ctx context.Context, _ string) ([]*workloadsv1.TSCOriginal, error) {
+	l, err := c.inner.List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -66,6 +73,6 @@ func (c *TSCClient) List(ctx context.Context, namespace string) ([]*workloadsv1.
 	return out, nil
 }
 
-func (c *TSCClient) Patch(ctx context.Context, namespace, name string, pt types.PatchType, data []byte) (*workloadsv1.TSCOriginal, error) {
-	return c.client.TSCOriginals(namespace).Patch(ctx, name, pt, data, metav1.PatchOptions{})
+func (c *TSCClient) Patch(ctx context.Context, _, name string, pt types.PatchType, data []byte) (*workloadsv1.TSCOriginal, error) {
+	return c.inner.Patch(ctx, name, pt, data, metav1.PatchOptions{})
 }

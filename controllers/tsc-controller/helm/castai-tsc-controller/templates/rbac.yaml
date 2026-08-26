@@ -48,4 +48,39 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "castai-tsc-controller.serviceAccountName" . }}
     namespace: {{ .Release.Namespace | default "castai-agent" }}
+---
+# Namespaced Role for TSCOriginal CRDs (rollback snapshots live here).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "castai-tsc-controller.fullname" . }}-originals
+  namespace: {{ .Release.Namespace | default "castai-agent" }}
+  labels:
+    {{- include "castai-tsc-controller.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["workloads.cast.ai"]
+    resources: ["tscoriginals"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["workloads.cast.ai"]
+    resources: ["tscoriginals/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["workloads.cast.ai"]
+    resources: ["tscoriginals/finalizers"]
+    verbs: ["update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "castai-tsc-controller.fullname" . }}-originals
+  namespace: {{ .Release.Namespace | default "castai-agent" }}
+  labels:
+    {{- include "castai-tsc-controller.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "castai-tsc-controller.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace | default "castai-agent" }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "castai-tsc-controller.fullname" . }}-originals
 {{- end }}

@@ -90,3 +90,14 @@ type NopLogger struct{}
 func (NopLogger) Infof(string, ...interface{})  {}
 func (NopLogger) Warnf(string, ...interface{})  {}
 func (NopLogger) Errorf(string, ...interface{}) {}
+
+// SimpleLogger is a Logger backed by three printf-style functions.
+type SimpleLogger struct {
+	Info  func(format string, args ...interface{})
+	Warn  func(format string, args ...interface{})
+	Error func(format string, args ...interface{})
+}
+
+func (l SimpleLogger) Infof(format string, args ...interface{}) { l.Info(format, args...) }
+func (l SimpleLogger) Warnf(format string, args ...interface{}) { l.Warn(format, args...) }
+func (l SimpleLogger) Errorf(format string, args ...interface{}) { l.Error(format, args...) }

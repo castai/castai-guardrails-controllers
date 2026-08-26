@@ -8,6 +8,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// NewTSCAccessor returns a typed Accessor for *workloadsv1.TSCOriginal.
+func NewTSCAccessor() *Accessor[*workloadsv1.TSCOriginal] { return &TSCOriginalAccessor }
+
+// NewJVMProbeAccessor returns a typed Accessor for *workloadsv1.JVMProbeOriginal.
+func NewJVMProbeAccessor() *Accessor[*workloadsv1.JVMProbeOriginal] { return &JVMProbeOriginalAccessor }
+
 // TSCOriginalAccessor binds Accessor[*TSCOriginal] for the tsc-controller.
 var TSCOriginalAccessor = Accessor[*workloadsv1.TSCOriginal]{
 	NameOf: func(o *workloadsv1.TSCOriginal) string {
