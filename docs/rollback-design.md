@@ -1,8 +1,25 @@
 # Rollback design for TSC & JVM-Probe Controllers
 
-**Status:** Design proposal — no code changes yet.
+**Status:** Implemented (PRs #19, #20, #21) — this document now describes the shipped behaviour. Operator procedure lives in [`docs/rollback-operator-runbook.md`](rollback-operator-runbook.md).
 **Scope:** `controllers/tsc-controller`, `controllers/jvm-probe-controller`. The PDB controller is out of scope: it manages standalone `PodDisruptionBudget` objects, so rollback there is trivially `kubectl delete pdb`.
 **Version:** v2 (CRD-based, mirroring `recommendations.autoscaling.cast.ai` pattern).
+
+---
+
+## 0. Implementation map
+
+| Layer | Lives in | What it does |
+|---|---|---|
+| CRDs (`TSCOriginal`, `JVMProbeOriginal`) | `apis/workloads/v1/` + `crds/` + `controllers/crds/helm/castai-guardrails-crds/` | Store per-workload original state in `castai-agent`. Namespaced, namespaced to `castai-agent`. |
+| Shared snapshot module | `snapshot/` (`capture.go`, `rollback.go`, `naming.go`, `conditions.go`, `finalizer.go`, `*_client.go`) | Collision-safe naming, `CaptureIfAbsent`, `Rollback` loop, finalizer lifecycle, status-condition helpers. Imported by both controllers. |
+| Typed clientsets | `clientset/versioned/typed/workloads/v1/{tscoriginal,jvmprobeoriginal}.go` | Generated typed clients used by `snapshot/` (no `dynamic.Interface`). |
+| TSC controller wiring | `controllers/tsc-controller/cmd/{main,configmap,rollback}.go` | ConfigMap parsing, capture call before Strategic Merge Patch, rollback transition detection, delete-handler finalizer cleanup. |
+| JVM-Probe controller wiring | `controllers/jvm-probe-controller/cmd/{main,configmap,probe_monitor,rollback}.go` | Same shape as TSC, plus a JSON-Patch `managedAnnotation` op appended atomically with probe ops. |
+| RBAC | `controllers/{tsc,jvm-probe}-controller/helm/.../templates/rbac.yaml` | Adds `workloads.cast.ai/<plural>` verbs on the controller's existing namespaced `Role`. |
+| Helm sub-chart | `controllers/crds/helm/castai-guardrails-crds/` | Installs both CRDs once. Both controller charts depend on it (`crds.enabled` toggle for pre-installed CRDs). |
+| Generated code | `hack/update-codegen.sh`, `hack/verify-codegen.sh` | Runs `deepcopy-gen`, `client-gen`, `lister-gen`, `informer-gen`; CI check ensures checked-in generated files match. |
+
+PR ordering that landed the implementation: #19 (CRDs + snapshot module) → #20 (TSC wiring) → #21 (JVM-Probe wiring). Operator docs (this file's `## Implementation` + the new runbook) are the final piece.
 
 ---
 
@@ -257,44 +274,85 @@ This gives operators dry-run visibility — snapshots + events show exactly what
 
 ---
 
-## 5. Package layout
+## 5. Package layout (shipped)
 
-Both controllers gain a mirrored (not shared — separate Go modules today) API package plus the snapshotter.
+The shipped layout moves shared types and logic out of per-controller `api/` packages into top-level `apis/`, `clientset/`, and `snapshot/` modules. Both controllers import from these shared modules via `go.mod` `replace` directives during development (pinned semver for release builds).
 
 ```
-controllers/tsc-controller/
-  api/workloads/v1/
-    types.go                       // NEW: TSCOriginal types, DeepCopy, register
-    zz_generated_deepcopy.go       // NEW: controller-gen output
-    groupversion_info.go           // NEW: scheme registration
-  cmd/
-    snapshot.go                    // NEW: TSCSnapshotter
-    main.go                        // MODIFIED: call CaptureIfAbsent, honour mode
-  helm/castai-tsc-controller/
-    crds/
-      tscoriginals.workloads.cast.ai.yaml   // NEW: CRD manifest
-    templates/
-      role.yaml                    // MODIFIED: add tscoriginals verbs
-
-controllers/jvm-probe-controller/
-  api/workloads/v1/
-    types.go                       // NEW: JVMProbeOriginal types
-    zz_generated_deepcopy.go
-    groupversion_info.go
-  cmd/
-    snapshot.go                    // NEW: JVMProbeSnapshotter
-    main.go                        // MODIFIED: applyPatchesWithSnapshot wrapper
-    probe_monitor.go               // MODIFIED: same wrapper on auto-fix path
-  helm/castai-jvm-probe-controller/
-    crds/
-      jvmprobeoriginals.workloads.cast.ai.yaml
-    templates/
-      role.yaml                    // MODIFIED
-
-controllers/manifests/rollback/    // NEW: operator recovery tooling
-  rollback-tsc.sh
-  rollback-jvm-probe.sh
-  README.md
+castai-guardrails-controllers/
+├── apis/workloads/v1/                          // NEW — PR 1
+│   ├── doc.go                                  // +k8s:deepcopy-gen=package
+│   ├── register.go                             // SchemeBuilder, AddToScheme
+│   ├── types_tscoriginal.go                    // TSCOriginal + Spec/Status/TargetRef
+│   ├── types_jvmprobeoriginal.go               // JVMProbeOriginal + ContainerProbes
+│   ├── zz_generated_deepcopy.go                // deepcopy-gen output
+│   └── zz_generated_register.go                // register-gen output
+│
+├── clientset/versioned/                        // NEW — PR 1 (generated)
+│   ├── clientset.go                            // client-gen output
+│   ├── scheme/                                 // generated
+│   ├── typed/workloads/v1/
+│   │   ├── tscoriginal.go                      // generated typed client
+│   │   └── jvmprobeoriginal.go
+│   ├── fake/                                   // fake clientset for tests
+│   ├── informers/                              // lister-gen + informer-gen
+│   └── listers/
+│
+├── snapshot/                                   // NEW — PR 1 (shared logic)
+│   ├── capture.go                              // CaptureIfAbsent + helpers
+│   ├── rollback.go                             // Rollback loop + inverse-patch orchestrator
+│   ├── naming.go                               // CollisionSafeName (uid-hash suffix)
+│   ├── conditions.go                           // SetCondition, IsReady, IsRolledBack
+│   ├── finalizer.go                            // AddFinalizer, RemoveFinalizer
+│   ├── tsc_client.go                           // Manager[TSCOriginal] wiring
+│   ├── jvm_client.go                           // Manager[JVMProbeOriginal] wiring
+│   └── *.{go,_test.go}                         // unit tests (≥80% coverage)
+│
+├── crds/                                       // NEW — PR 1 (raw manifests)
+│   ├── workloads.cast.ai_tscoriginals.yaml
+│   └── workloads.cast.ai_jvmprobeoriginals.yaml
+│
+├── controllers/
+│   ├── crds/                                   // NEW — PR 1 (helm sub-chart)
+│   │   └── helm/castai-guardrails-crds/
+│   │       ├── Chart.yaml
+│   │       ├── values.yaml
+│   │       ├── charts/castai-guardrails-crds-0.1.0.tgz   # sub-chart tarball
+│   │       └── templates/
+│   │           ├── tscoriginal-crd.yaml
+│   │           └── jvmprobeoriginal-crd.yaml
+│   │
+│   ├── tsc-controller/                         // MODIFIED — PR 2
+│   │   ├── cmd/
+│   │   │   ├── main.go                         // wires snapshot.Manager, detect rollback transition
+│   │   │   ├── configmap.go                    // NEW — managementEnabled/rollbackOnDisable/mode parsing
+│   │   │   ├── configmap_test.go               // NEW — parser edge cases
+│   │   │   ├── rollback.go                     // NEW — tscInverseFn (strategic-merge inverse patch)
+│   │   │   └── rollback_test.go                // NEW — inverse-patch construction
+│   │   ├── go.mod                              // + apis, clientset, snapshot module deps
+│   │   └── helm/castai-tsc-controller/
+│   │       ├── Chart.yaml                      // + dependency on castai-guardrails-crds
+│   │       ├── values.yaml                     // + management.{enabled,rollbackOnDisable,mode}, snapshot.enabled
+│   │       └── templates/
+│   │           ├── configmap.yaml              // + new keys
+│   │           ├── rbac.yaml                   // + workloads.cast.ai verbs
+│   │           └── deployment.yaml             // unchanged
+│   │
+│   ├── jvm-probe-controller/                   // MODIFIED — PR 3
+│   │   └── ... same shape as tsc-controller ...
+│   │
+│   └── manifests/                              // unchanged (out-of-tree kustomize)
+│
+├── docs/
+│   ├── rollback-design.md                      // this file — Implementation map updated post-merge
+│   └── rollback-operator-runbook.md            // NEW — operator-facing procedure (PR 4)
+│
+├── hack/                                       // NEW — PR 1
+│   ├── update-codegen.sh                       // runs deepcopy-gen, register-gen, client-gen, lister-gen, informer-gen
+│   ├── verify-codegen.sh                       // CI check: generated files up-to-date
+│   └── boilerplate.go.txt                      // license header for generated files
+│
+└── go.mod / go.sum                             // unchanged at repo root (per-controller modules)
 ```
 
 ### 5.1 Snapshotter interface (TSC)
@@ -353,57 +411,115 @@ Idempotent by construction. No leader lock required around snapshotting itself (
 
 ---
 
-## 6. Rollback tooling (operator UX)
+## 6. Rollback flow (shipped)
 
-No controller endpoint. Rollback is a **standalone shell CLI** shipped under `controllers/manifests/rollback/`:
+Rollback is **driven by the controller**, not a separate CLI. The original design (§14, alternatives) reconsidered the CLI and the v2 implementation pushes the rollback loop into the reconcile path. Operator trigger is a single ConfigMap edit; the controller detects the transition and runs the inverse-patch loop asynchronously.
 
-### 6.1 `rollback-tsc.sh`
+### 6.1 Trigger (shipped)
 
+The reconcile loop is gated by two ConfigMap booleans plus a mode flag. See §7 for full key listing.
+
+| `managementEnabled` | `rollbackOnDisable` | What the controller does |
+|:-:|:-:|---|
+| `true` (default) | any | Normal reconcile — capture snapshot before patching (unless `mode: recommend`). |
+| `false` | `false` (default) | Freeze — skip all mutation, leave already-patched workloads as-is. |
+| `false` | `true` | **Triggered rollback**: on the `true → false` transition, run the rollback loop **once**, then behave as freeze. Each CRD restored is marked `status.conditions[type=RolledBack]=True`. |
+
+The transition detector is the ConfigMap watcher. When it sees `old.managementEnabled && !new.managementEnabled && new.rollbackOnDisable`, it fires `runRollback()` in a goroutine — the informer callback must not block.
+
+```go
+if oldCfg.ManagementEnabled && !newCfg.ManagementEnabled && newCfg.RollbackOnDisable {
+    go c.runRollback()
+}
 ```
-rollback-tsc.sh --namespace default --workload deployment/my-app          # single workload
-rollback-tsc.sh --namespace default --all                                 # every workload with a TSCOriginal in that ns
-rollback-tsc.sh --all-namespaces --dry-run                                # preview, no changes
-rollback-tsc.sh --namespace default --workload deployment/my-app --pause-controller
-rollback-tsc.sh --namespace default --workload deployment/my-app --keep-original
+
+### 6.2 The rollback loop
+
+`runRollback()` calls `snapshot.Manager.Rollback(ctx, inverseFn)`. Per CRD:
+
+1. Skip if `status.conditions[type=RolledBack].status == "True"` (idempotent re-run).
+2. Resolve the target workload by `TargetRef` (Deployment or StatefulSet).
+   - Not found → mark `RolledBack=True, reason=TargetGone`, remove finalizer.
+   - UID mismatch (workload deleted + recreated with same name) → same as not-found.
+3. Build the inverse patch (see §6.3 and §6.4 for type-specific logic).
+4. Apply patch.
+5. On success: set `status.conditions[type=RolledBack].status="True", reason=RollbackApplied`. **Keep the finalizer** — see §6.5.
+6. On failure: log + emit event, leave the CRD unchanged, continue with the next. Return an aggregated error at the end.
+
+### 6.3 TSC inverse patch (Strategic Merge)
+
+Controller: `tsc-controller`. Built in `controllers/tsc-controller/cmd/rollback.go::tscInverseFn`.
+
+```go
+// Inverse of "castai overwrote topologySpreadConstraints":
+//   - OriginalTSCsPresent=false  -> topologySpreadConstraints: null  (remove field)
+//   - OriginalTSCsPresent=true, OriginalTSCs=nil -> same as above
+//   - OriginalTSCsPresent=true, OriginalTSCs=[]  -> set field to []
+//   - Otherwise -> set field to OriginalTSCs
 ```
 
-Flow:
+The inverse patch is wrapped in `{ "spec": { "template": { "spec": { "topologySpreadConstraints": <value-or-null> } } } }` and applied with `types.StrategicMergePatchType`. `kubectl patch` equivalent:
 
-1. `kubectl get tscoriginals -n castai-agent -o json --field-selector spec.targetRef.namespace=<ns>`.
-2. For each targeted workload:
-   a. Verify `spec.targetRef.uid` matches the live workload's UID (protects against name reuse). Skip with warning if not.
-   b. Read `spec.original.topologySpreadConstraints` and `spec.original.absent`.
-   c. Build a strategic-merge patch:
-      - If `absent: true` → `{"spec":{"template":{"spec":{"topologySpreadConstraints":null}}}}` (removes field).
-      - Else → `{"spec":{"template":{"spec":{"topologySpreadConstraints": <original list>}}}}`.
-   d. `kubectl patch <kind> <name> -n <workload-ns> --type=strategic --patch <patch>`.
-   e. On success:
-      - `kubectl patch tscoriginal <ns>-<name> -n castai-agent --type=merge --patch '{"status":{"conditions":[...RolledBack=True...]}}'`
-      - Unless `--keep-original`: `kubectl patch tscoriginal ... --type=json --patch '[{"op":"remove","path":"/metadata/finalizers"}]'` → K8s GC deletes the CRD.
-3. Print a summary table (workload, before, after, status).
-4. `--pause-controller` scales the controller Deployment (`castai-tsc-controller` or `castai-jvm-probe-controller`, as installed by the standard Helm chart) to 0 replicas first, restores at the end. Prevents the controller from re-patching mid-rollback. Only supports Deployment-based installs (the default and only shipped shape).
+```bash
+kubectl -n <workload-ns> patch deploy/<name> --type=strategic \
+  --patch '{"spec":{"template":{"spec":{"topologySpreadConstraints":null}}}}'
+# or with the original list:
+kubectl -n <workload-ns> patch deploy/<name> --type=strategic \
+  --patch '{"spec":{"template":{"spec":{"topologySpreadConstraints":[{"maxSkew":1,...}]}}}}'
+```
 
-### 6.2 `rollback-jvm-probe.sh`
+The same shape applies to StatefulSets — `tscInverseFn` switches on `TargetRef.Kind`.
 
-Same UX. Patch construction is more elaborate because it's per-container:
+### 6.4 JVM-Probe inverse patch (JSON Patch)
 
-1. Fetch live workload's containers, build a `name → index` map.
-2. For each container in `spec.original.containers`:
-   - Skip (with warning) if the container name no longer exists on the live workload.
-   - For each of `livenessProbe`, `readinessProbe`, `startupProbe`:
-     - `*Present == true` → JSON-Patch `replace` op at `/spec/template/spec/containers/<idx>/<probeField>`.
-     - `*Present == false` **and** the field is currently present on the live workload → JSON-Patch `remove` op.
-     - `*Present == false` and field already absent → no-op.
-3. Apply all ops in one `kubectl patch --type=json`.
-4. Update CRD status and remove finalizer as in §6.1.
+Controller: `jvm-probe-controller`. Built in `controllers/jvm-probe-controller/cmd/rollback.go::jvmInverseFn`.
 
-**Container matching by name, not index** — survives container reordering (a common cause of index-based patch bugs).
+For each container in the live workload, look up the captured `ContainerProbes` by **container name** (not index — survives reordering):
 
-### 6.3 Why a shell script, not a controller endpoint
+| Captured state | Rollback op |
+|---|---|
+| `LivenessPresent=false` (castai added it) | `{"op":"remove","path":"/spec/template/spec/containers/<i>/livenessProbe"}` |
+| `LivenessPresent=true` (castai replaced existing) | `{"op":"replace","path":"/spec/template/spec/containers/<i>/livenessProbe","value":<original probe>}` |
+| Container name not in snapshot | skip — castai never touched it |
 
-- Rollback is a rare, deliberate, human-authorised action. Baking it into the controller invites self-rollback loops.
-- `kubectl` + `jq` are already on every operator's laptop.
-- The script works even when the controller is stopped or uninstalled — the CRDs are still there.
+Same three-way switch for `readinessProbe` and `startupProbe`. All ops are concatenated into a single JSON-Patch document and applied with `types.JSONPatchType`:
+
+```bash
+kubectl -n <workload-ns> patch deploy/<name> --type=json \
+  --patch '[
+    {"op":"remove","path":"/spec/template/spec/containers/0/livenessProbe"},
+    {"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe","value":{...}},
+    {"op":"remove","path":"/spec/template/spec/containers/0/startupProbe"}
+  ]'
+```
+
+### 6.5 CRD retention and `RolledBack=True`
+
+**Post-rollback, the CRD is kept** — never garbage-collected by the rollback loop. This is intentional:
+
+- Operators want to audit *what was rolled back, when, and why* after the fact.
+- If `managementEnabled` is later flipped back to `true`, `CaptureIfAbsent` sees `RolledBack=True` and treats the CRD as absent: it deletes the old CRD and creates a fresh snapshot from the (now rolled-back) workload state. This gives operators a clean “roll back → inspect → resume with a new baseline” cycle.
+- A snapshot with `RolledBack=True` and `Ready=True` is never overwritten by `CaptureIfAbsent` until the rolled-back-flag is cleared (which only happens via this delete-and-recreate path).
+
+Operators can still `kubectl delete tscoriginal` / `kubectl delete jvmprobeoriginal` manually — see [`docs/rollback-operator-runbook.md`](rollback-operator-runbook.md) § “Recovering from accidental patch”.
+
+The CRD's `status.conditions` exposes two lifecycle conditions, queried with `kubectl get tsco -o jsonpath='{.items[*].status.conditions}'`:
+
+| Condition | Meaning |
+|---|---|
+| `Ready=True` | Snapshot was successfully captured and a patch was applied at least once. |
+| `RolledBack=True` | Rollback loop successfully restored the target workload from this snapshot. `reason` is one of `RollbackApplied`, `TargetGone`, `BypassAnnotation`. |
+
+### 6.6 Why in-controller instead of a CLI
+
+The original design proposed `rollback-tsc.sh` / `rollback-jvm-probe.sh` (now removed). The v2 implementation moves the loop into the controller because:
+
+- One reconcile-driven code path handles capture, apply, and rollback. No second binary to ship, no separate RBAC context (kubectl auth via user vs. controller SA).
+- ConfigMap hot-reload is already implemented in both controllers — piggy-backs for free.
+- Operators can put the flip in their GitOps repo (Argo / Flux) and treat rollback declaratively.
+- Rollback remains a deliberate, human-authorised action — the `managementEnabled=true → false` transition is what fires it, and flipping it back requires another operator edit.
+
+`.kimchi/docs/manual-rollback-jvm-probes-and-tsc.md` retains the manual `kubectl patch` recipes for environments where the controllers aren't yet wired to the CRD feature.
 
 ---
 
@@ -445,15 +561,42 @@ When `whitelistOnly: "true"`, only workloads carrying the label are eligible:
 
 The label must be on both the controller (Deployment/StatefulSet) and the pod template, matching Workload Autoscaler's whitelisting convention.
 
-### 7.1 New ConfigMap knobs (both controllers)
+### 7.1 ConfigMap knobs (both controllers, shipped)
+
+All four knobs are hot-reloaded via the existing ConfigMap watch — no controller restart needed.
+
+| Key | Default | Type | Effect |
+|---|:-:|---|---|
+| `managementEnabled` | `true` | bool | Master switch. `false` freezes the controller — no capture, no patch. |
+| `rollbackOnDisable` | `false` | bool | Only meaningful when `managementEnabled=false`. When `true`, the `true→false` transition of `managementEnabled` triggers a one-shot rollback loop that restores every snapshotted workload. CRDs are kept post-rollback with `status.conditions[type=RolledBack]=True`. |
+| `mode` | `apply` | enum | `apply` — capture + patch (normal). `recommend` — capture and emit events but do **not** patch. Useful for first-Prod-install dry-run. Unknown values fail the ConfigMap parse. |
+| `snapshotEnabled` | `true` | bool | Kill-switch for the snapshot path. `false` disables `CaptureIfAbsent`; the patch loop keeps working but no CRD is written. **Use this as the first lever if snapshots misbehave in production** — flip to `false` and hot-reload, no redeploy. |
+
+Example ConfigMap (TSC; JVM-Probe identical):
 
 ```yaml
-mode: "apply"                # apply | recommend
-whitelistOnly: "false"       # if true, only labeled workloads are eligible
-snapshotEnabled: "true"      # kill-switch — set to false to disable snapshotting entirely
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: castai-tsc-controller-config
+  namespace: castai-agent
+data:
+  managementEnabled: "true"
+  rollbackOnDisable: "false"
+  mode: "apply"
+  snapshotEnabled: "true"
+  # ... existing knobs (minReplicas, labelSelector, ...) ...
 ```
 
-**Kill-switch matters:** if snapshotting misbehaves in production, ops can flip `snapshotEnabled: "false"` and hot-reload without redeploying. The patch loop keeps working; rollback data just stops being captured.
+Env-var overrides (final word) for emergency operations:
+
+- `MANAGEMENT_ENABLED=true|false` — override at startup.
+- `MODE=apply|recommend` — override at startup.
+- `OPERATOR_NAMESPACE` — override the namespace where CRDs live (default `castai-agent`).
+
+Env vars are read once at startup; flipping them requires a controller restart. Use ConfigMap keys for hot-reload.
+
+**Recommended mode for first Prod install:** `mode=recommend` + `snapshotEnabled=true`. Watch `kubectl get tscoriginals -n castai-agent` and controller events for one rollout cycle, then flip to `mode=apply`. See [`docs/rollback-operator-runbook.md`](rollback-operator-runbook.md) § “Recommend mode (dry-run)”.
 
 ---
 
