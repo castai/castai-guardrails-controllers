@@ -15,3 +15,9 @@ maintainers:
     email: support@cast.ai
 sources:
   - https://github.com/castai/sales-engineering-snaphot-analyzer
+dependencies:
+  - name: castai-guardrails-crds
+    version: 0.1.0
+    repository: file://../../../crds/helm/castai-guardrails-crds
+    condition: crds.enabled
+    alias: crds

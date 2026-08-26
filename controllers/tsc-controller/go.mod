@@ -3,15 +3,25 @@ module github.com/castai/tsc-controller
 go 1.26
 
 require (
+	github.com/castai/castai-guardrails-controllers/apis v0.0.0
+	github.com/castai/castai-guardrails-controllers/clientset v0.0.0
+	github.com/castai/castai-guardrails-controllers/snapshot v0.0.0-00010101000000-000000000000
 	k8s.io/api v0.28.2
 	k8s.io/apimachinery v0.28.2
 	k8s.io/client-go v0.28.2
 	k8s.io/klog/v2 v2.100.1
 )
 
+replace (
+	github.com/castai/castai-guardrails-controllers/apis => ../../apis
+	github.com/castai/castai-guardrails-controllers/clientset => ../../clientset
+	github.com/castai/castai-guardrails-controllers/snapshot => ../../snapshot
+)
+
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.11.0 // indirect
+	github.com/evanphx/json-patch v4.12.0+incompatible // indirect
 	github.com/go-logr/logr v1.2.4 // indirect
 	github.com/go-openapi/jsonpointer v0.19.6 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
@@ -30,6 +40,7 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	golang.org/x/net v0.14.0 // indirect
 	golang.org/x/oauth2 v0.8.0 // indirect

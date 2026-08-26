@@ -113,6 +113,33 @@ metrics:
 rbac:
   create: true
 
+# Rollback snapshot behavior — see docs/rollback-operator-runbook.md
+snapshot:
+  # If true, controller captures workload state to a TSCOriginal CRD before
+  # patching. Required for rollback to work. Recommended: true in Prod.
+  enabled: true
+
+# Runtime behavior toggles — hot-reloaded via ConfigMap watch.
+management:
+  # Master switch. When false, controller stops making new patches. Existing
+  # patched workloads keep their patches unless rollbackOnDisable=true.
+  enabled: true
+
+  # Only meaningful when enabled=false. When true, flipping enabled from true
+  # to false triggers a one-shot rollback loop that restores every snapshotted
+  # workload. CRDs are kept post-rollback with status.conditions[RolledBack]=True.
+  rollbackOnDisable: false
+
+  # Operation mode (orthogonal to enabled):
+  #   apply     — controller mutates workloads (default, today's behaviour).
+  #   recommend — controller observes and captures snapshots but does NOT
+  #               patch. Useful for first-Prod-install dry run.
+  mode: apply
+
+# CRD chart control — set false only if you install CRDs out-of-band.
+crds:
+  enabled: true
+
 # Pod disruption budget for the controller
 podDisruptionBudget:
   enabled: true

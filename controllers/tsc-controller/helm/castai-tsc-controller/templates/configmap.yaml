@@ -12,6 +12,14 @@ data:
   reconcileInterval: "{{ .Values.config.reconcileInterval }}"
   garbageCollectInterval: "{{ .Values.config.garbageCollectInterval }}"
   dryRun: "{{ .Values.config.dryRun }}"
+  enableTSCManagement: "{{ .Values.config.enableTSCManagement }}"
+
+  # NEW — rollback and management state (hot-reloaded)
+  managementEnabled: "{{ .Values.management.enabled }}"
+  rollbackOnDisable: "{{ .Values.management.rollbackOnDisable }}"
+  mode: "{{ .Values.management.mode }}"
+  snapshotEnabled: "{{ .Values.snapshot.enabled }}"
+  operatorNamespace: "{{ .Release.Namespace | default "castai-agent" }}"
   {{- if .Values.config.exclusions }}
   exclusions: '{{ .Values.config.exclusions | toJson }}'
   {{- else }}
