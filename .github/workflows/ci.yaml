@@ -39,7 +39,8 @@ jobs:
       - name: Docker build check
         uses: docker/build-push-action@v6
         with:
-          context: controllers/pdb-controller
+          context: .
+          file: controllers/pdb-controller/Dockerfile
           push: false
           load: true
           platforms: linux/amd64
@@ -75,7 +76,8 @@ jobs:
       - name: Docker build check
         uses: docker/build-push-action@v6
         with:
-          context: controllers/tsc-controller
+          context: .
+          file: controllers/tsc-controller/Dockerfile
           push: false
           load: true
           platforms: linux/amd64
@@ -111,7 +113,8 @@ jobs:
       - name: Docker build check
         uses: docker/build-push-action@v6
         with:
-          context: controllers/jvm-probe-controller
+          context: .
+          file: controllers/jvm-probe-controller/Dockerfile
           push: false
           load: true
           platforms: linux/amd64

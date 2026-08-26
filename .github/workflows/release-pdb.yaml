@@ -24,7 +24,8 @@ jobs:
       id-token: write
     with:
       image_name: castai-pdb-controller
-      context: controllers/pdb-controller
+      context: .
+      dockerfile: controllers/pdb-controller/Dockerfile
       version: ${{ needs.prepare.outputs.version }}
 
   helm:
