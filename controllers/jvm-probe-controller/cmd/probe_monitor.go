@@ -585,7 +585,17 @@ func (p *PodEventMonitor) patchWorkloadProbesFrameworkAware(ctx context.Context,
 		return nil // Nothing to patch
 	}
 
-	return p.applyPatches(ctx, req.WorkloadKind, req.WorkloadNamespace, req.WorkloadName, patches)
+	if err := p.applyPatches(ctx, req.WorkloadKind, req.WorkloadNamespace, req.WorkloadName, patches); err != nil {
+		return err
+	}
+
+	// PR3: mark workload as managed so the patch path skips capture on next reconcile.
+	// Capture itself is owned by main.go's processWorkload path; here we only need
+	// to mark managed so subsequent reconciles are idempotent.
+	if err := markJVMWorkloadManaged(ctx, req.WorkloadKind, req.WorkloadNamespace, req.WorkloadName); err != nil {
+		logWarn("monitor-managed", "Failed to set managed annotation on %s/%s: %v", req.WorkloadNamespace, req.WorkloadName, err)
+	}
+	return nil
 }
 
 // buildTimingPatch creates JSON patches for only timing fields

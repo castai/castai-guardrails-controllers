@@ -28,6 +28,11 @@ func NewJVMClient(restConfig *rest.Config, namespace string) (*JVMClient, error)
 	return &JVMClient{inner: c.JVMProbeOriginals(namespace)}, nil
 }
 
+// NewJVMClientFromClient builds a JVMClient from a typed WorkloadsV1 client.
+func NewJVMClientFromClient(c workloadsclient.WorkloadsV1Interface, namespace string) *JVMClient {
+	return &JVMClient{inner: c.JVMProbeOriginals(namespace)}
+}
+
 // NewJVMClientFromInterface is a test-friendly constructor.
 func NewJVMClientFromInterface(i workloadsclient.JVMProbeOriginalInterface) *JVMClient {
 	return &JVMClient{inner: i}

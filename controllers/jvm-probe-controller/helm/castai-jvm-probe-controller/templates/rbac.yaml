@@ -54,4 +54,39 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "castai-jvm-probe-controller.serviceAccountName" . }}
     namespace: {{ .Release.Namespace | default "castai-agent" }}
+---
+# Namespaced Role for JVMProbeOriginal CRDs (rollback snapshots live here).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "castai-jvm-probe-controller.fullname" . }}-originals
+  namespace: {{ .Release.Namespace | default "castai-agent" }}
+  labels:
+    {{- include "castai-jvm-probe-controller.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["workloads.cast.ai"]
+    resources: ["jvmprobeoriginals"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["workloads.cast.ai"]
+    resources: ["jvmprobeoriginals/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["workloads.cast.ai"]
+    resources: ["jvmprobeoriginals/finalizers"]
+    verbs: ["update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "castai-jvm-probe-controller.fullname" . }}-originals
+  namespace: {{ .Release.Namespace | default "castai-agent" }}
+  labels:
+    {{- include "castai-jvm-probe-controller.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "castai-jvm-probe-controller.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace | default "castai-agent" }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "castai-jvm-probe-controller.fullname" . }}-originals
 {{- end }}

@@ -23,28 +23,6 @@ type FrameworkConfig struct {
 	UseTCPSocket         bool   `yaml:"useTCPSocket"`
 }
 
-// JVMConfig holds the overall JVM probe controller configuration
-type JVMConfig struct {
-	Frameworks            map[string]FrameworkConfig `yaml:"frameworks"`
-	LogInterval           string                      `yaml:"logInterval"`
-	ReconcileInterval     string                      `yaml:"reconcileInterval"`
-	RequireBothProbes     bool                        `yaml:"requireBothProbes"`
-	SkipIfAnyProbeExists  bool                        `yaml:"skipIfAnyProbeExists"`
-	Exclusions            string                      `yaml:"exclusions"`
-
-	// P1: Liveness probe safety - opt-in by default
-	InjectLivenessProbe   bool                        `yaml:"injectLivenessProbe"`
-	InjectReadinessProbe  bool                        `yaml:"injectReadinessProbe"`
-	InjectStartupProbe    bool                        `yaml:"injectStartupProbe"`
-
-	// P2: Dry-run / observe-only mode
-	DryRun                bool                        `yaml:"dryRun"`
-
-// P3: Enable/disable probe management (allows disabling without ConfigMap change)
-EnableProbeManagement bool                        `yaml:"enableProbeManagement"`
-	LogIntendedChanges    bool                        `yaml:"logIntendedChanges"`
-}
-
 // DefaultFrameworkConfigs returns default framework configurations
 func DefaultFrameworkConfigs() map[string]FrameworkConfig {
 	return map[string]FrameworkConfig{
@@ -116,6 +94,13 @@ func DefaultJVMConfig() JVMConfig {
 		LogIntendedChanges:     true,
 		// P3: Enable/disable probe management (allows disabling without ConfigMap change)
 		EnableProbeManagement:  true,
+		// PR3 defaults
+		ManagementEnabled:      true,
+		RollbackOnDisable:      false,
+		Mode:                   ModeApply,
+		SnapshotEnabled:        true,
+		OperatorNamespace:      "castai-agent",
+		Version:                "dev",
 	}
 }
 

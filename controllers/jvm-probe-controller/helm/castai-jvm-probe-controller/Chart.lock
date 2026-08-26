@@ -1,0 +1,6 @@
+dependencies:
+- name: castai-guardrails-crds
+  repository: file://../../../crds/helm/castai-guardrails-crds
+  version: 0.1.0
+digest: sha256:366ef3619c4a7bd13345f06fa4ef17a55442e7e92fcafc2024d79259257acdac
+generated: "2026-08-26T14:20:03.392763-03:00"

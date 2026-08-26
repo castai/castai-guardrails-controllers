@@ -29,3 +29,10 @@ data:
   {{- else }}
   jvm-exclusions: "[]"
   {{- end }}
+
+  # NEW — rollback and management state (hot-reloaded)
+  managementEnabled: "{{ .Values.management.enabled }}"
+  rollbackOnDisable: "{{ .Values.management.rollbackOnDisable }}"
+  mode: "{{ .Values.management.mode }}"
+  snapshotEnabled: "{{ .Values.snapshot.enabled }}"
+  operatorNamespace: "{{ .Release.Namespace | default "castai-agent" }}"

@@ -34,6 +34,10 @@ import (
 
 	appv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+
+	workloadsv1 "github.com/castai/castai-guardrails-controllers/apis/workloads/v1"
+	workloadsclient "github.com/castai/castai-guardrails-controllers/clientset/versioned/typed/workloads/v1"
+	"github.com/castai/castai-guardrails-controllers/snapshot"
 )
 
 // Controller constants
@@ -53,6 +57,7 @@ var (
 	version         bool
 
 	clientset           *kubernetes.Clientset
+	workloadsClient     workloadsclient.WorkloadsV1Interface
 	recorder            record.EventRecorder
 	config              *JVMConfig
 	configLock          sync.RWMutex
@@ -60,6 +65,9 @@ var (
 	workloadsProcessed  = make(map[types.NamespacedName]bool)
 	workloadsLock       sync.Mutex
 	informerStopCh      chan struct{}
+
+	jvmClient   *snapshot.JVMClient
+	jvmAccessor *snapshot.Accessor[*workloadsv1.JVMProbeOriginal]
 )
 
 // init registers flags
@@ -187,14 +195,27 @@ func handleWorkloadDelete(workqueue workqueue.RateLimitingInterface, meta metav1
 	workloadsLock.Lock()
 	delete(workloadsProcessed, types.NamespacedName{Namespace: meta.Namespace, Name: meta.Name})
 	workloadsLock.Unlock()
+	// PR3: remove snapshot finalizer so the JVMProbeOriginal CRD can be deleted.
+	removeJVMFinalizer(context.Background(), meta.Namespace, meta.Name, meta.UID)
 	logInfo("delete", "Workload deleted: %s", key)
 }
 
 // handleConfigMapUpdate handles ConfigMap updates
 func handleConfigMapUpdate(cm *corev1.ConfigMap) {
-	newConfig := parseConfigMap(cm)
 	configLock.Lock()
-	oldConfig := config
+	var oldState RollbackState
+	if config != nil {
+		oldState = config.StateOf()
+	}
+	configLock.Unlock()
+
+	envVersion := os.Getenv("OPERATOR_VERSION")
+	newConfig, parseErrs := ParseJVMConfig(cm, envVersion)
+	for _, e := range parseErrs {
+		logWarn("config-parse", "ConfigMap field error: %v", e)
+	}
+
+	configLock.Lock()
 	config = newConfig
 	configLock.Unlock()
 
@@ -211,69 +232,240 @@ func handleConfigMapUpdate(cm *corev1.ConfigMap) {
 		exclusionRules = rules
 	}
 
-	logInfo("configmap", "ConfigMap updated: logInterval=%s, reconcileInterval=%s",
-		newConfig.LogInterval, newConfig.ReconcileInterval)
+	// Re-wire snapshot client if operator namespace changed.
+	if jvmClient != nil {
+		jvmClient = snapshot.NewJVMClientFromClient(workloadsClient, newConfig.OperatorNamespace)
+	}
 
-	// If significant config changed, trigger reconciliation
-	if oldConfig != nil && oldConfig.ReconcileInterval != newConfig.ReconcileInterval {
-		logInfo("configmap", "Reconcile interval changed, triggering reconciliation")
+	logInfo("configmap", "ConfigMap updated: logInterval=%s, reconcileInterval=%s mgmt=%v rollback=%v mode=%s",
+		newConfig.LogInterval, newConfig.ReconcileInterval,
+		newConfig.ManagementEnabled, newConfig.RollbackOnDisable, newConfig.Mode)
+
+	newState := newConfig.StateOf()
+	if oldState.ManagementEnabled && !newState.ManagementEnabled && newState.RollbackOnDisable {
+		logInfo("rollback-trigger", "managementEnabled went true→false; triggering rollback asynchronously")
+		go runJVMRollback()
 	}
 }
 
-// parseConfigMap parses the ConfigMap into JVMConfig
-func parseConfigMap(cm *corev1.ConfigMap) *JVMConfig {
-	cfg := DefaultJVMConfig()
+// runJVMRollback executes the rollback loop over all JVMProbeOriginal snapshots.
+func runJVMRollback() {
+	if jvmClient == nil || jvmAccessor == nil {
+		return
+	}
+	configLock.RLock()
+	ns := config.OperatorNamespace
+	configLock.RUnlock()
 
-	if data, ok := cm.Data["jvm-frameworks"]; ok {
-		if err := json.Unmarshal([]byte(data), &cfg.Frameworks); err != nil {
-			logWarn("config", "Failed to parse jvm-frameworks: %v", err)
+	logger := snapshot.SimpleLogger{
+		Info:  func(format string, args ...interface{}) { logInfo("jvm-snapshot", format, args...) },
+		Warn:  func(format string, args ...interface{}) { logWarn("jvm-snapshot", format, args...) },
+		Error: func(format string, args ...interface{}) { logError("jvm-snapshot", format, args...) },
+	}
+	if err := snapshot.Rollback(context.Background(),
+		jvmClient,
+		*jvmAccessor,
+		logger,
+		ns,
+		snapshot.FinalizerName(ControllerName),
+		jvmInverseFn(clientset),
+		func(ctx context.Context, snap *workloadsv1.JVMProbeOriginal) error {
+			return applyInverseJVMPatch(ctx, clientset, snap)
+		},
+	); err != nil {
+		logError("rollback", "JVM rollback loop had errors: %v", err)
+	}
+}
+
+// captureJVMOriginal captures the per-container probes on a workload before
+// patch, if snapshotting is enabled. Skips when the workload is already
+// annotated as managed (idempotent re-runs).
+func captureJVMOriginal(ctx context.Context, kind, namespace, name string, obj metav1.Object) {
+	if jvmClient == nil || jvmAccessor == nil {
+		return
+	}
+	configLock.RLock()
+	enabled := config.SnapshotEnabled
+	controllerVersion := config.Version
+	operatorNS := config.OperatorNamespace
+	configLock.RUnlock()
+	if !enabled {
+		return
+	}
+
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	if snapshot.IsManaged(annotations, ControllerName) {
+		return
+	}
+
+	identity := snapshot.WorkloadIdentity{
+		APIVersion:  "apps/v1",
+		Kind:        kind,
+		Namespace:   namespace,
+		Name:        name,
+		UID:         obj.GetUID(),
+		Generation:  obj.GetGeneration(),
+		Annotations: annotations,
+	}
+
+	newFn := func(id snapshot.WorkloadIdentity) (*workloadsv1.JVMProbeOriginal, error) {
+		crdName := snapshot.CollisionSafeName(id.Kind, id.Namespace, id.Name, id.UID)
+		var containers map[string]workloadsv1.ContainerProbes
+		switch id.Kind {
+		case "Deployment":
+			d, err := clientset.AppsV1().Deployments(id.Namespace).Get(ctx, id.Name, metav1.GetOptions{})
+			if err == nil {
+				containers = buildJVMSnapshotContainers(d.Spec.Template.Spec.Containers)
+			}
+		case "StatefulSet":
+			s, err := clientset.AppsV1().StatefulSets(id.Namespace).Get(ctx, id.Name, metav1.GetOptions{})
+			if err == nil {
+				containers = buildJVMSnapshotContainers(s.Spec.Template.Spec.Containers)
+			}
+		}
+		return &workloadsv1.JVMProbeOriginal{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      crdName,
+				Namespace: id.Namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": ControllerName,
+				},
+			},
+			Spec: workloadsv1.JVMProbeOriginalSpec{
+				TargetRef: workloadsv1.TargetRef{
+					APIVersion: id.APIVersion,
+					Kind:       id.Kind,
+					Namespace:  id.Namespace,
+					Name:       id.Name,
+					UID:        id.UID,
+				},
+				OriginalContainers: containers,
+				CapturedAt:         metav1.Now(),
+				ControllerVersion:  controllerVersion,
+			},
+		}, nil
+	}
+
+	logger := snapshot.SimpleLogger{
+		Info:  func(format string, args ...interface{}) { logInfo("jvm-snapshot", format, args...) },
+		Warn:  func(format string, args ...interface{}) { logWarn("jvm-snapshot", format, args...) },
+		Error: func(format string, args ...interface{}) { logError("jvm-snapshot", format, args...) },
+	}
+	if err := snapshot.CaptureIfAbsent(ctx,
+		jvmClient, *jvmAccessor, logger,
+		operatorNS,
+		snapshot.FinalizerName(ControllerName),
+		ControllerName,
+		identity, newFn,
+	); err != nil {
+		logError("capture", "Capture failed for %s/%s/%s: %v", kind, namespace, name, err)
+	}
+}
+
+// buildJVMSnapshotContainers extracts per-container probes for snapshot.
+func buildJVMSnapshotContainers(cs []corev1.Container) map[string]workloadsv1.ContainerProbes {
+	containers := make(map[string]workloadsv1.ContainerProbes, len(cs))
+	for _, c := range cs {
+		containers[c.Name] = workloadsv1.ContainerProbes{
+			LivenessProbe:    c.LivenessProbe,
+			ReadinessProbe:   c.ReadinessProbe,
+			StartupProbe:     c.StartupProbe,
+			LivenessPresent:  c.LivenessProbe != nil,
+			ReadinessPresent: c.ReadinessProbe != nil,
+			StartupPresent:   c.StartupProbe != nil,
 		}
 	}
+	return containers
+}
 
-	if val, ok := cm.Data["jvm-logInterval"]; ok {
-		cfg.LogInterval = val
+// removeJVMFinalizer removes the controller finalizer from snapshots owned
+// by the given workload UID, so the workload can be deleted.
+func removeJVMFinalizer(ctx context.Context, namespace, name string, uid types.UID) {
+	if jvmClient == nil || workloadsClient == nil {
+		return
 	}
+	configLock.RLock()
+	operatorNS := config.OperatorNamespace
+	configLock.RUnlock()
+	list, err := workloadsClient.JVMProbeOriginals(operatorNS).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		logWarn("snapshot-list", "Failed to list JVM snapshots: %v", err)
+		return
+	}
+	for i := range list.Items {
+		snap := &list.Items[i]
+		if snap.Spec.TargetRef.Namespace != namespace ||
+			snap.Spec.TargetRef.Name != name ||
+			snap.Spec.TargetRef.UID != uid {
+			continue
+		}
+		if err := snapshot.RemoveFinalizer(ctx, jvmClient, *jvmAccessor,
+			operatorNS, snap.Name, snapshot.FinalizerName(ControllerName)); err != nil {
+			logWarn("snapshot-finalizer", "Failed to remove finalizer from %s: %v", snap.Name, err)
+		}
+	}
+}
 
-	if val, ok := cm.Data["jvm-reconcileInterval"]; ok {
-		cfg.ReconcileInterval = val
+// markJVMWorkloadManaged sets the workloads.cast.ai/jvm-probe-controller-managed=true
+// annotation on the workload via Strategic Merge Patch.
+func markJVMWorkloadManaged(ctx context.Context, kind, namespace, name string) error {
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": map[string]interface{}{
+				snapshot.ManagedAnnotationName(ControllerName): "true",
+			},
+		},
 	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case "Deployment":
+		_, err = clientset.AppsV1().Deployments(namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+	case "StatefulSet":
+		_, err = clientset.AppsV1().StatefulSets(namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+	}
+	return err
+}
 
-	if val, ok := cm.Data["jvm-requireBothProbes"]; ok {
-		cfg.RequireBothProbes = val != "false"
+// reconcileJVMSnapshots removes finalizers from orphaned snapshots at startup.
+func reconcileJVMSnapshots(ctx context.Context) error {
+	if jvmClient == nil {
+		return nil
 	}
-
-	if val, ok := cm.Data["jvm-skipIfAnyProbeExists"]; ok {
-		cfg.SkipIfAnyProbeExists = val == "true"
+	configLock.RLock()
+	operatorNS := config.OperatorNamespace
+	configLock.RUnlock()
+	list, err := jvmClient.List(ctx, operatorNS)
+	if err != nil {
+		return fmt.Errorf("list jvm snapshots: %w", err)
 	}
-
-	if val, ok := cm.Data["jvm-exclusions"]; ok {
-		cfg.Exclusions = val
+	for _, snap := range list {
+		conds := jvmAccessor.GetConditions(snap)
+		if snapshot.IsRolledBack(conds) {
+			continue
+		}
+		ref := snap.Spec.TargetRef
+		var err error
+		switch ref.Kind {
+		case "Deployment":
+			_, err = clientset.AppsV1().Deployments(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		case "StatefulSet":
+			_, err = clientset.AppsV1().StatefulSets(ref.Namespace).Get(ctx, ref.Name, metav1.GetOptions{})
+		default:
+			continue
+		}
+		if errors.IsNotFound(err) {
+			if err := snapshot.RemoveFinalizer(ctx, jvmClient, *jvmAccessor, operatorNS, snap.Name, snapshot.FinalizerName(ControllerName)); err != nil {
+				logWarn("orphan-finalizer", "Failed to remove JVM finalizer from %s: %v", snap.Name, err)
+			}
+		}
 	}
-
-	// P1: Liveness probe injection control
-	if val, ok := cm.Data["jvm-injectLivenessProbe"]; ok {
-		cfg.InjectLivenessProbe = val == "true"
-	}
-	if val, ok := cm.Data["jvm-injectReadinessProbe"]; ok {
-		cfg.InjectReadinessProbe = val == "true"
-	}
-	if val, ok := cm.Data["jvm-injectStartupProbe"]; ok {
-		cfg.InjectStartupProbe = val == "true"
-	}
-
-	// P2: Dry-run mode
-	if val, ok := cm.Data["jvm-dryRun"]; ok {
-		cfg.DryRun = val == "true"
-	}
-	if val, ok := cm.Data["jvm-logIntendedChanges"]; ok {
-		cfg.LogIntendedChanges = val == "true"
-	}
-
-	// P3: Enable/disable probe management from env (allows disabling without ConfigMap change)
-	if envVal := os.Getenv("ENABLE_PROBE_MANAGEMENT"); envVal != "" {
-		cfg.EnableProbeManagement = envVal == "true"
-	}
-	return &cfg
+	return nil
 }
 
 // parseExclusionRules parses exclusion rules from ConfigMap
@@ -390,6 +582,8 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 	var name, namespace string
 	var annotations map[string]string
 	var spec *corev1.PodSpec
+	var metaObj metav1.Object
+	var kind string
 
 	switch o := obj.(type) {
 	case *appv1.Deployment:
@@ -397,16 +591,26 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 		namespace = o.Namespace
 		annotations = o.Annotations
 		spec = &o.Spec.Template.Spec
+		metaObj = o
+		kind = "Deployment"
 	case *appv1.StatefulSet:
 		name = o.Name
 		namespace = o.Namespace
 		annotations = o.Annotations
 		spec = &o.Spec.Template.Spec
+		metaObj = o
+		kind = "StatefulSet"
 	default:
 		return nil
 	}
 
 	nn := types.NamespacedName{Namespace: namespace, Name: name}
+
+	// PR3: managementEnabled is the freeze toggle. If disabled, return early.
+	if cfg != nil && !cfg.ManagementEnabled {
+		logInfo("disabled", "Skipping %s, management disabled", nn)
+		return nil
+	}
 
 	// Check bypass annotation
 	if IsBypassAnnotation(annotations) {
@@ -419,8 +623,8 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 
 	// Check exclusion rules
 	labelsMap := make(map[string]string)
-	if meta, ok := obj.(metav1.Object); ok {
-		labelsMap = meta.GetLabels()
+	if metaObj != nil {
+		labelsMap = metaObj.GetLabels()
 	}
 
 	if exclusionRules.IsExcluded(namespace, name, labelsMap) {
@@ -437,6 +641,16 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 		// Don't mark as processed so it will be reprocessed when re-enabled
 		return nil
 	}
+
+	// PR3: recommend mode = capture-only, do not patch.
+	if cfg.Mode == ModeRecommend {
+		captureJVMOriginal(ctx, kind, namespace, name, metaObj)
+		logInfo("recommend", "[RECOMMEND] Would inject probes into %s", nn)
+		return nil
+	}
+
+	// PR3: capture snapshot before first patch (no-op if already captured).
+	captureJVMOriginal(ctx, kind, namespace, name, metaObj)
 
 	// Get framework override
 	frameworkOverride := GetFrameworkOverride(annotations)
@@ -607,6 +821,11 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 	if err := c.applyPatches(ctx, obj, allPatches); err != nil {
 		logError("patch", "Failed to patch workload %s: %v", nn, err)
 		return err
+	}
+
+	// PR3: mark workload as managed so subsequent reconciles skip capture.
+	if err := markJVMWorkloadManaged(ctx, kind, namespace, name); err != nil {
+		logWarn("managed-annot", "Failed to set managed annotation on %s: %v", nn, err)
 	}
 
 	// Record success
@@ -861,7 +1080,10 @@ func main() {
 
 	// Try to load ConfigMap
 	if cm, err := clientset.CoreV1().ConfigMaps(configNamespace).Get(context.Background(), ConfigMapName, metav1.GetOptions{}); err == nil {
-		newConfig := parseConfigMap(cm)
+		newConfig, parseErrs := ParseJVMConfig(cm, os.Getenv("OPERATOR_VERSION"))
+		for _, e := range parseErrs {
+			logWarn("config-parse", "ConfigMap field error: %v", e)
+		}
 		config = newConfig
 
 		if newConfig.LogInterval != "" {
@@ -873,9 +1095,22 @@ func main() {
 		if newConfig.Exclusions != "" {
 			exclusionRules = parseExclusionRules(newConfig.Exclusions)
 		}
-		logAlways("Loaded configuration from ConfigMap %s/%s", configNamespace, ConfigMapName)
+		logAlways("Loaded configuration from ConfigMap %s/%s (mgmt=%v rollback=%v mode=%s snapshot=%v ns=%s)",
+			configNamespace, ConfigMapName,
+			newConfig.ManagementEnabled, newConfig.RollbackOnDisable, newConfig.Mode,
+			newConfig.SnapshotEnabled, newConfig.OperatorNamespace)
 	} else {
 		logAlways("ConfigMap not found, using defaults")
+	}
+
+	// Create workloads typed client and wire snapshot clients.
+	workloadsClient = workloadsclient.NewForConfigOrDie(restConfig)
+	jvmClient = snapshot.NewJVMClientFromClient(workloadsClient, config.OperatorNamespace)
+	jvmAccessor = snapshot.NewJVMProbeAccessor()
+
+	// Reconcile orphaned JVM snapshots at startup.
+	if err := reconcileJVMSnapshots(context.Background()); err != nil {
+		logWarn("orphan-reconcile", "Startup JVM orphan reconcile had errors: %v", err)
 	}
 
 	// Create shared informer factory
