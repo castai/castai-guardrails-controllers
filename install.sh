@@ -9,9 +9,9 @@
 #   - Installs via Helm from local charts in ./controllers/
 #   - Verifies rollout
 #
-# Image tag defaults to Chart.yaml appVersion (always the version
-# deployed alongside the chart). Override with TSC_IMAGE_TAG=...
-# in non-interactive mode.
+# Image tag defaults to "latest" (most recent build pushed to the registry).
+# Override with TSC_IMAGE_TAG=..., JVM_IMAGE_TAG=..., PDB_IMAGE_TAG=... in
+# non-interactive mode.
 #
 # Interactive by default; non-interactive when INSTALL_* env vars
 # are preset (matches castctl --non-interactive).
@@ -254,7 +254,7 @@ CRDS_CHART="${SCRIPT_DIR}/controllers/crds/helm/castai-guardrails-crds"
 [ -d "$CRDS_CHART" ] || fatal "CRDs chart not found at $CRDS_CHART"
 
 # -------------------------
-# Read appVersion from Chart.yaml (single source of truth)
+# Read appVersion from Chart.yaml (kept for display; not the image tag default)
 # -------------------------
 chart_app_version() {
   local chart_dir="$1"
@@ -468,9 +468,9 @@ if [ "$IS_INTERACTIVE" = true ]; then
   echo "============================================================"
   echo "  Namespace : ${NAMESPACE}"
   echo "  Cluster   : ${CLUSTER_NAME}"
-  [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_APP:-latest}  dryRun=${TSC_DRY_RUN}"
-  [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_APP:-latest}  dryRun=${JVM_DRY_RUN}"
-  [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_APP:-latest}  FixPoorPDBs=true (live)"
+  [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_IMAGE_TAG_OVERRIDE:-latest}  dryRun=${TSC_DRY_RUN}"
+  [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-latest}  dryRun=${JVM_DRY_RUN}"
+  [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_IMAGE_TAG_OVERRIDE:-latest}  FixPoorPDBs=true (live)"
   echo ""
 
   if ! confirm "Proceed with installation?" y; then
@@ -545,13 +545,13 @@ install_chart() {
   local dry="$4"
   local prefix="$5"
 
-  # Resolve tag: env-var override (non-interactive) > Chart.AppVersion
+  # Resolve tag: env-var override (non-interactive) > "latest" (registry default)
   local override_var="${prefix}_IMAGE_TAG_OVERRIDE"
   local image_tag
   if [ -n "${!override_var:-}" ]; then
     eval "image_tag=\"\${${override_var}}\""
   else
-    image_tag="$app_version"
+    image_tag="latest"
   fi
 
   step "Installing ${release} (tag=${image_tag}, dryRun=${dry})"
