@@ -329,25 +329,26 @@ checkbox_menu() {
   stty -echo -icanon min 1 time 0 </dev/tty
   printf '\033[?25l' >/dev/tty   # hide cursor
 
-  # Initial render: print title + one line per item + a footer
-  {
-    printf '\n'
-    printf '  %s\n' "$title"
-    printf '  %s\n' "$(printf '%.0s─' $(seq 1 60))"
-    for ((i = 0; i < n; i++)); do printf '\n'; done
-    printf '\n'
-    printf '  \033[2m↑/↓ or j/k navigate  ·  Space toggles  ·  Enter confirms  ·  Ctrl-C cancels\033[0m\n'
-  } >/dev/tty
-
-  local footer_lines=3   # blank + hint + trailing blank room
-  local total_lines=$((n + 3 + footer_lines - 1))
+  # Save the top-of-menu anchor before any rendering happens. Every redraw()
+  # restores the cursor to this point and issues "\033[J" (erase below) so
+  # wrapped or stale lines from the previous render cannot leak through on
+  # narrow terminals — this is what previously caused the duplicated
+  # selection rendering. We deliberately drop the old cursor-up/down
+  # arithmetic: save+restore + erase-below handles positioning cleanly even
+  # when an item wraps to more than one visual line.
+  printf '\n' >/dev/tty
+  printf '\033[s' >/dev/tty
 
   redraw() {
-    # Move cursor up to the first item line
-    printf '\033[%dA' "$total_lines" >/dev/tty
-    # Skip the title (1) + separator (1) + leading blank (1) = 3 lines
-    printf '\033[3B' >/dev/tty
+    # Restore cursor to the top-of-menu anchor and wipe everything below it.
+    printf '\033[u' >/dev/tty
+    printf '\033[J' >/dev/tty
 
+    # Re-render the full menu: blank, title, separator, items, blank, hint footer.
+    printf '\n' >/dev/tty
+    printf '  %s\n' "$title" >/dev/tty
+    printf '  %s\n' "$(printf '%.0s─' $(seq 1 60))" >/dev/tty
+    local i
     for ((i = 0; i < n; i++)); do
       printf '\r\033[2K' >/dev/tty         # clear line
       local mark=' '; [ "${checked[i]}" -eq 1 ] && mark='x'
@@ -357,8 +358,8 @@ checkbox_menu() {
         printf '    [%s] %s\n' "$mark" "${items[i]}" >/dev/tty
       fi
     done
-    # Move cursor back down past footer to leave prompt below
-    printf '\033[%dB' "$footer_lines" >/dev/tty
+    printf '\n' >/dev/tty
+    printf '  \033[2m↑/↓ or j/k navigate  ·  Space toggles  ·  Enter confirms  ·  Ctrl-C cancels\033[0m\n' >/dev/tty
   }
 
   redraw
@@ -683,4 +684,33 @@ step "Bypass a single workload with an annotation:"
 echo "    workloads.cast.ai/tsc-bypass: \"true\""
 echo "    workloads.cast.ai/jvm-probe-bypass: \"true\""
 echo "    workloads.cast.ai/bypass-default-pdb: \"true\""
+echo ""
+echo "============================================================"
+echo " Next steps"
+echo "============================================================"
+echo ""
+step "Enable/disable automation:"
+echo "    kubectl patch configmap castai-tsc-controller-config -n ${NAMESPACE} --type merge \\"
+echo "      -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\"}}'"
+echo "    kubectl patch configmap castai-jvm-probe-controller-config -n ${NAMESPACE} --type merge \\"
+echo "      -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\"}}'"
+echo ""
+step "Disable and rollback changes:"
+echo "    kubectl patch configmap castai-tsc-controller-config -n ${NAMESPACE} --type merge \\"
+echo "      -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
+echo "    kubectl patch configmap castai-jvm-probe-controller-config -n ${NAMESPACE} --type merge \\"
+echo "      -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
+echo ""
+step "Dry-run / recommend mode (capture snapshots but do not patch):"
+echo "    kubectl patch configmap castai-tsc-controller-config -n ${NAMESPACE} --type merge \\"
+echo "      -p '{\"data\":{\"managementEnabled\":\"true\",\"mode\":\"recommend\"}}'"
+echo ""
+step "Verify snapshots:"
+echo "    kubectl get tscoriginals -n ${NAMESPACE}"
+echo "    kubectl get jvmprobeoriginals -n ${NAMESPACE}"
+echo ""
+step "Check rollback status:"
+echo "    kubectl get tscoriginals -n ${NAMESPACE} -o jsonpath='{range .items[*]}{.metadata.name}{\"\t\"}{.status.conditions[?(@.type==\"RolledBack\")].status}{\"\n\"}{end}'"
+echo ""
+step "See docs/rollback-operator-runbook.md for the full runbook."
 echo "============================================================"
