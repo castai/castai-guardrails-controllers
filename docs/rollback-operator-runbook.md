@@ -45,7 +45,7 @@ If `READY=False` for a long time, see §6 (Troubleshooting).
 
 **Best-practice rollout for a fresh cluster:**
 
-1. Install with defaults (`mode=apply`, `snapshotEnabled=true`, `managementEnabled=true`).
+1. Install with defaults (`mode=recommend`, `snapshotEnabled=true`, `managementEnabled=true`).
 2. Watch `kubectl get tscoriginals,jvmprobeoriginals -n castai-agent -w` over one workload rollout cycle.
 3. Spot-check one CRD:
    ```bash
