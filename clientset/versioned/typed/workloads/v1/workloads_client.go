@@ -33,7 +33,17 @@ func NewForConfig(c *rest.Config) (*WorkloadsV1Client, error) {
 	cfg.APIPath = "/apis"
 	cfg.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
 	cfg.UserAgent = rest.DefaultKubernetesUserAgent() + " castai-guardrails-controllers/clientset/v0.0.0"
-	client, err := rest.RESTClientForConfigAndClient(cfg, nil)
+
+	// Build an HTTP client from the config so TLS CA/certificate data from
+	// the kubeconfig is used. Passing nil to RESTClientForConfigAndClient
+	// leaves the REST client without the custom transport, causing
+	// "certificate signed by unknown authority" errors on clusters like GKE.
+	httpClient, err := rest.HTTPClientFor(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := rest.RESTClientForConfigAndClient(cfg, httpClient)
 	if err != nil {
 		return nil, err
 	}
