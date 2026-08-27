@@ -47,7 +47,7 @@ func Rollback[T any](
 	if err != nil {
 		return fmt.Errorf("list snapshots: %w", err)
 	}
-	logger.Infof("rollback: %d snapshot(s) to consider", len(items))
+	logger.Infof("rollback: starting in namespace %s with %d snapshot(s) to consider", namespace, len(items))
 
 	var errs []error
 	rolledBack := 0
@@ -131,6 +131,7 @@ func Rollback[T any](
 	}
 
 	logger.Infof("rollback: complete (rolledBack=%d, skipped=%d, errors=%d)", rolledBack, skipped, len(errs))
+	logger.Infof("rollback: completed namespace=%s rolledBack=%d skipped=%d errors=%d", namespace, rolledBack, skipped, len(errs))
 	if len(errs) == 0 {
 		return nil
 	}

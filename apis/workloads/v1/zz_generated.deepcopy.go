@@ -135,6 +135,13 @@ func (in *JVMProbeOriginalSpec) DeepCopyInto(out *JVMProbeOriginalSpec) {
 			(*out)[key] = *val.DeepCopy()
 		}
 	}
+	if in.AppliedContainers != nil {
+		in, out := &in.AppliedContainers, &out.AppliedContainers
+		*out = make(map[string]ContainerProbes, len(*in))
+		for key, val := range *in {
+			(*out)[key] = *val.DeepCopy()
+		}
+	}
 	in.CapturedAt.DeepCopyInto(&out.CapturedAt)
 }
 
@@ -235,6 +242,13 @@ func (in *TSCOriginalSpec) DeepCopyInto(out *TSCOriginalSpec) {
 	out.TargetRef = in.TargetRef
 	if in.OriginalTSCs != nil {
 		in, out := &in.OriginalTSCs, &out.OriginalTSCs
+		*out = make([]corev1.TopologySpreadConstraint, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.AppliedTSCs != nil {
+		in, out := &in.AppliedTSCs, &out.AppliedTSCs
 		*out = make([]corev1.TopologySpreadConstraint, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])

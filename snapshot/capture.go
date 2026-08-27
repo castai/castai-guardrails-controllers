@@ -61,6 +61,8 @@ func CaptureIfAbsent[T any](
 	// but the snapshot is missing, the snapshot was lost between Create and
 	// the workload patch. We can never safely recapture post-patch state.
 	if !hasExisting && IsManaged(identity.Annotations, controllerName) {
+		logger.Warnf("capture-if-absent: SnapshotLost guard triggered for workload %s/%s — managed annotation present but snapshot %s/%s is missing; skipping capture",
+			identity.Namespace, identity.Name, namespace, name)
 		logger.Warnf("capture-if-absent: SnapshotLost — workload %s/%s is annotated as managed but snapshot %s/%s is missing; skipping capture to avoid corrupting rollback data",
 			identity.Namespace, identity.Name, namespace, name)
 		return nil
@@ -118,5 +120,6 @@ func CaptureIfAbsent[T any](
 	if _, err := c.UpdateStatus(ctx, namespace, created); err != nil {
 		return fmt.Errorf("update status: %w", err)
 	}
+	logger.Infof("snapshot created: %s/%s", namespace, acc.NameOf(created))
 	return nil
 }

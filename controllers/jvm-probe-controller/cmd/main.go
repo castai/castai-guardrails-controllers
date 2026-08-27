@@ -279,8 +279,11 @@ func runJVMRollback() {
 
 // captureJVMOriginal captures the per-container probes on a workload before
 // patch, if snapshotting is enabled. Skips when the workload is already
-// annotated as managed (idempotent re-runs).
-func captureJVMOriginal(ctx context.Context, kind, namespace, name string, obj metav1.Object) {
+// annotated as managed (idempotent re-runs). applied/appliedPresent are
+// recorded when capture happens after the controller's patch succeeded;
+// pre-patch callers pass nil/false and update the existing snapshot via
+// recordAppliedJVMContainers after the patch instead.
+func captureJVMOriginal(ctx context.Context, kind, namespace, name string, obj metav1.Object, appliedContainers map[string]workloadsv1.ContainerProbes, appliedPresent bool) {
 	if jvmClient == nil || jvmAccessor == nil {
 		return
 	}
@@ -342,9 +345,11 @@ func captureJVMOriginal(ctx context.Context, kind, namespace, name string, obj m
 					Name:       id.Name,
 					UID:        id.UID,
 				},
-				OriginalContainers: containers,
-				CapturedAt:         metav1.Now(),
-				ControllerVersion:  controllerVersion,
+				OriginalContainers:      containers,
+				AppliedContainers:       appliedContainers,
+				AppliedContainersPresent: appliedPresent,
+				CapturedAt:              metav1.Now(),
+				ControllerVersion:       controllerVersion,
 			},
 		}, nil
 	}
@@ -363,6 +368,33 @@ func captureJVMOriginal(ctx context.Context, kind, namespace, name string, obj m
 	); err != nil {
 		logError("capture", "Capture failed for %s/%s/%s: %v", kind, namespace, name, err)
 	}
+}
+
+// recordAppliedJVMContainers updates Spec.AppliedContainers and
+// AppliedContainersPresent on the existing snapshot in-place. CaptureIfAbsent
+// is a no-op when a Ready snapshot already exists, so post-patch applied-state
+// writes must go through Get+Update directly.
+func recordAppliedJVMContainers(ctx context.Context, kind, namespace, name string, uid types.UID, applied map[string]workloadsv1.ContainerProbes, appliedPresent bool) {
+	if jvmClient == nil || jvmAccessor == nil {
+		return
+	}
+	configLock.RLock()
+	operatorNS := config.OperatorNamespace
+	configLock.RUnlock()
+
+	crdName := snapshot.CollisionSafeName(kind, namespace, name, uid)
+	existing, err := jvmClient.Get(ctx, operatorNS, crdName)
+	if err != nil {
+		logWarn("applied-jvm", "Failed to load snapshot %s/%s for applied containers update: %v", operatorNS, crdName, err)
+		return
+	}
+	existing.Spec.AppliedContainers = applied
+	existing.Spec.AppliedContainersPresent = appliedPresent
+	if _, err := jvmClient.Update(ctx, operatorNS, existing); err != nil {
+		logWarn("applied-jvm", "Failed to update snapshot %s/%s with applied containers: %v", operatorNS, crdName, err)
+		return
+	}
+	logInfo("applied-jvm", "Recorded applied containers on snapshot %s/%s", operatorNS, crdName)
 }
 
 // buildJVMSnapshotContainers extracts per-container probes for snapshot.
@@ -644,13 +676,13 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 
 	// PR3: recommend mode = capture-only, do not patch.
 	if cfg.Mode == ModeRecommend {
-		captureJVMOriginal(ctx, kind, namespace, name, metaObj)
+		captureJVMOriginal(ctx, kind, namespace, name, metaObj, nil, false)
 		logInfo("recommend", "[RECOMMEND] Would inject probes into %s", nn)
 		return nil
 	}
 
 	// PR3: capture snapshot before first patch (no-op if already captured).
-	captureJVMOriginal(ctx, kind, namespace, name, metaObj)
+	captureJVMOriginal(ctx, kind, namespace, name, metaObj, nil, false)
 
 	// Get framework override
 	frameworkOverride := GetFrameworkOverride(annotations)
@@ -824,6 +856,19 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 		return err
 	}
 
+	// Re-fetch the live workload and record the applied container probes on
+	// the existing snapshot. The pre-patch capture was a no-op when a Ready
+	// snapshot already existed; we update applied state in-place via
+	// Get+Update so CaptureIfAbsent's "skip when Ready" rule doesn't drop
+	// the post-patch write.
+	if live, lerr := c.fetchLive(ctx, kind, namespace, name); lerr == nil {
+		if liveSpec, ok := liveSpecOf(live); ok {
+			applied := buildJVMSnapshotContainers(liveSpec.Containers)
+			appliedPresent := liveSpec.Containers != nil || applied != nil
+			recordAppliedJVMContainers(ctx, kind, namespace, name, metaObj.GetUID(), applied, appliedPresent)
+		}
+	}
+
 	// PR3: mark workload as managed so subsequent reconciles skip capture.
 	if err := markJVMWorkloadManaged(ctx, kind, namespace, name); err != nil {
 		logWarn("managed-annot", "Failed to set managed annotation on %s: %v", nn, err)
@@ -838,6 +883,31 @@ func (c *Controller) processWorkload(ctx context.Context, obj runtime.Object, cf
 	recorder.Eventf(obj, corev1.EventTypeNormal, "ProbesInjected", "JVM probes injected successfully")
 
 	return nil
+}
+
+// fetchLive returns the current Deployments/StatefulSets object for the
+// given kind/name. Used to read post-patch state for applied-snapshot
+// recording.
+func (c *Controller) fetchLive(ctx context.Context, kind, namespace, name string) (runtime.Object, error) {
+	switch kind {
+	case "Deployment":
+		return clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	case "StatefulSet":
+		return clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
+	default:
+		return nil, fmt.Errorf("unsupported kind: %s", kind)
+	}
+}
+
+// liveSpecOf returns the pod template spec from a Deployment or StatefulSet.
+func liveSpecOf(obj runtime.Object) (*corev1.PodSpec, bool) {
+	switch o := obj.(type) {
+	case *appv1.Deployment:
+		return &o.Spec.Template.Spec, true
+	case *appv1.StatefulSet:
+		return &o.Spec.Template.Spec, true
+	}
+	return nil, false
 }
 
 // applyPatches applies JSON patches to a workload
@@ -1108,6 +1178,7 @@ func main() {
 	workloadsClient = workloadsclient.NewForConfigOrDie(restConfig)
 	jvmClient = snapshot.NewJVMClientFromClient(workloadsClient, config.OperatorNamespace)
 	jvmAccessor = snapshot.NewJVMProbeAccessor()
+	logInfo("snapshot-client", "Snapshot client wired for namespace %s", config.OperatorNamespace)
 
 	// Reconcile orphaned JVM snapshots at startup.
 	if err := reconcileJVMSnapshots(context.Background()); err != nil {

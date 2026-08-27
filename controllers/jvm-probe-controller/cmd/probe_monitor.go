@@ -589,6 +589,24 @@ func (p *PodEventMonitor) patchWorkloadProbesFrameworkAware(ctx context.Context,
 		return err
 	}
 
+	// Record applied probes on the existing snapshot in-place. CaptureIfAbsent
+	// is a no-op when a Ready snapshot already exists, so post-patch writes
+	// must go through Get+Update directly.
+	if live, lerr := p.getWorkload(ctx, req.WorkloadNamespace, req.WorkloadName, req.WorkloadKind); lerr == nil {
+		if spec, ok := liveSpecOf(live); ok {
+			applied := buildJVMSnapshotContainers(spec.Containers)
+			appliedPresent := spec.Containers != nil || applied != nil
+			var uid types.UID
+			switch w := live.(type) {
+			case *appv1.Deployment:
+				uid = w.UID
+			case *appv1.StatefulSet:
+				uid = w.UID
+			}
+			recordAppliedJVMContainers(ctx, req.WorkloadKind, req.WorkloadNamespace, req.WorkloadName, uid, applied, appliedPresent)
+		}
+	}
+
 	// PR3: mark workload as managed so the patch path skips capture on next reconcile.
 	// Capture itself is owned by main.go's processWorkload path; here we only need
 	// to mark managed so subsequent reconciles are idempotent.

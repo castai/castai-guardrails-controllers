@@ -65,6 +65,20 @@ type TSCOriginalSpec struct {
 	// OriginalTSCsPresent distinguishes "field was nil" from "field was empty slice".
 	OriginalTSCsPresent bool `json:"originalTSCsPresent"`
 
+	// AppliedTSCs is the post-castai value of
+	// spec.template.spec.topologySpreadConstraints on the target workload,
+	// captured immediately after the controller's patch succeeded. Stored so
+	// operators can inspect the effective change and so that downstream
+	// tooling (drift detection, post-mortem analysis) can compare applied vs
+	// original without re-reading the live workload. Rollback itself still
+	// uses OriginalTSCs.
+	// +optional
+	AppliedTSCs []corev1.TopologySpreadConstraint `json:"appliedTSCs,omitempty"`
+
+	// AppliedTSCsPresent distinguishes "applied field was nil" from
+	// "applied field was empty slice".
+	AppliedTSCsPresent bool `json:"appliedTSCsPresent"`
+
 	// +kubebuilder:validation:Required
 	CapturedAt metav1.Time `json:"capturedAt"`
 
@@ -115,6 +129,18 @@ type JVMProbeOriginalSpec struct {
 
 	// OriginalContainers maps container name to its pre-castai probe set.
 	OriginalContainers map[string]ContainerProbes `json:"originalContainers"`
+
+	// AppliedContainers maps container name to its post-castai probe set,
+	// captured immediately after the controller's patch succeeded. Stored
+	// for inspection and drift detection; rollback itself still uses
+	// OriginalContainers.
+	// +optional
+	AppliedContainers map[string]ContainerProbes `json:"appliedContainers,omitempty"`
+
+	// AppliedContainersPresent distinguishes "no applied containers recorded"
+	// (e.g. capture happened before patch) from "applied containers was an
+	// empty map" (patched away every probe).
+	AppliedContainersPresent bool `json:"appliedContainersPresent"`
 
 	// +kubebuilder:validation:Required
 	CapturedAt metav1.Time `json:"capturedAt"`
