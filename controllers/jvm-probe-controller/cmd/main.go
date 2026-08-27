@@ -332,7 +332,7 @@ func captureJVMOriginal(ctx context.Context, kind, namespace, name string, obj m
 		return &workloadsv1.JVMProbeOriginal{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      crdName,
-				Namespace: id.Namespace,
+				Namespace: operatorNS,
 				Labels: map[string]string{
 					"app.kubernetes.io/managed-by": ControllerName,
 				},
@@ -497,6 +497,105 @@ func reconcileJVMSnapshots(ctx context.Context) error {
 			}
 		}
 	}
+	return nil
+}
+
+// jvmSnapshotLookup is the minimal snapshot-client surface used by
+// reconcileManagedAnnotations. Using an interface keeps the function mockable
+// in tests without dragging in a fake typed clientset.
+type jvmSnapshotLookup interface {
+	Get(ctx context.Context, namespace, name string) (*workloadsv1.JVMProbeOriginal, error)
+}
+
+// reconcileManagedAnnotations walks Deployments and StatefulSets across all
+// namespaces and removes the workloads.cast.ai/<controller>-managed annotation
+// from any workload whose JVMProbeOriginal snapshot CRD is missing.
+//
+// Why this exists: when the controller is uninstalled, the managed annotation
+// is left on existing workloads. After a fresh install, CaptureIfAbsent
+// short-circuits on the annotation (lost-snapshot guard) and never captures,
+// leaving those workloads un-rollable-back. This reconciler repairs the gap
+// at startup so the next reconcile can capture a fresh snapshot.
+//
+// Errors are logged but not fatal — one bad workload must not block the rest.
+func reconcileManagedAnnotations(
+	ctx context.Context,
+	cs kubernetes.Interface,
+	operatorNS string,
+	snapClient jvmSnapshotLookup,
+) error {
+	if cs == nil || snapClient == nil || operatorNS == "" {
+		return nil
+	}
+	managedAnnotation := snapshot.ManagedAnnotationName(ControllerName)
+
+	deps, err := cs.AppsV1().Deployments("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list deployments: %w", err)
+	}
+	for i := range deps.Items {
+		d := &deps.Items[i]
+		if d.Annotations[managedAnnotation] != "true" {
+			continue
+		}
+		if err := reconcileOneJVMSnapshot(ctx, cs, snapClient, operatorNS, managedAnnotation, "Deployment", d.Namespace, d.Name, d.UID); err != nil {
+			logWarn("managed-annot", "Failed to reconcile Deployment %s/%s: %v", d.Namespace, d.Name, err)
+		}
+	}
+	ssets, err := cs.AppsV1().StatefulSets("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list statefulsets: %w", err)
+	}
+	for i := range ssets.Items {
+		s := &ssets.Items[i]
+		if s.Annotations[managedAnnotation] != "true" {
+			continue
+		}
+		if err := reconcileOneJVMSnapshot(ctx, cs, snapClient, operatorNS, managedAnnotation, "StatefulSet", s.Namespace, s.Name, s.UID); err != nil {
+			logWarn("managed-annot", "Failed to reconcile StatefulSet %s/%s: %v", s.Namespace, s.Name, err)
+		}
+	}
+	return nil
+}
+
+// reconcileOneJVMSnapshot checks whether the JVM snapshot CRD for a single
+// managed workload still exists and, if not, removes the managed annotation.
+func reconcileOneJVMSnapshot(
+	ctx context.Context,
+	cs kubernetes.Interface,
+	snapClient jvmSnapshotLookup,
+	operatorNS, annotation, kind, namespace, name string,
+	uid types.UID,
+) error {
+	crdName := snapshot.CollisionSafeName(kind, namespace, name, uid)
+	if _, err := snapClient.Get(ctx, operatorNS, crdName); err == nil {
+		// Snapshot exists, managed annotation is correct.
+		return nil
+	} else if !errors.IsNotFound(err) {
+		return fmt.Errorf("get snapshot %s/%s: %w", operatorNS, crdName, err)
+	}
+
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": map[string]interface{}{
+				annotation: nil,
+			},
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case "Deployment":
+		_, err = cs.AppsV1().Deployments(namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+	case "StatefulSet":
+		_, err = cs.AppsV1().StatefulSets(namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+	}
+	if err != nil {
+		return fmt.Errorf("patch %s %s/%s: %w", kind, namespace, name, err)
+	}
+	logWarn("managed-annot-stripped", "Removed stale %s annotation from %s %s/%s (snapshot %s/%s missing)", annotation, kind, namespace, name, operatorNS, crdName)
 	return nil
 }
 
@@ -1183,6 +1282,12 @@ func main() {
 	// Reconcile orphaned JVM snapshots at startup.
 	if err := reconcileJVMSnapshots(context.Background()); err != nil {
 		logWarn("orphan-reconcile", "Startup JVM orphan reconcile had errors: %v", err)
+	}
+
+	// Strip stale managed annotations from workloads whose snapshot CRD is
+	// missing (e.g. after an uninstall on a fresh install).
+	if err := reconcileManagedAnnotations(context.Background(), clientset, config.OperatorNamespace, jvmClient); err != nil {
+		logWarn("managed-annot-reconcile", "Startup JVM managed-annotation reconcile had errors: %v", err)
 	}
 
 	// Create shared informer factory

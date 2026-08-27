@@ -170,6 +170,11 @@ func main() {
 				if err := reconcileOrphanedSnapshots(ctx); err != nil {
 					logError("orphan-reconcile", "Startup orphan reconcile had errors: %v", err)
 				}
+				// Strip stale managed annotations from workloads whose snapshot
+				// CRD is missing (e.g. after an uninstall on a fresh install).
+				if err := reconcileManagedAnnotations(ctx, clientset, config.OperatorNamespace, tscClient); err != nil {
+					logWarn("managed-annot-reconcile", "Startup managed-annotation reconcile had errors: %v", err)
+				}
 				runController(ctx)
 			},
 			OnStoppedLeading: func() {
@@ -547,6 +552,103 @@ func targetGone(ctx context.Context, ref workloadsv1.TargetRef) (bool, error) {
 	return false, nil
 }
 
+// tscSnapshotLookup is the minimal snapshot-client surface used by
+// reconcileManagedAnnotations. Using an interface keeps the function mockable
+// in tests without dragging in a fake typed clientset.
+type tscSnapshotLookup interface {
+	Get(ctx context.Context, namespace, name string) (*workloadsv1.TSCOriginal, error)
+}
+
+// reconcileManagedAnnotations walks Deployments and StatefulSets across all
+// namespaces and removes the workloads.cast.ai/tsc-managed annotation from
+// any workload whose TSCOriginal snapshot CRD is missing.
+//
+// Why this exists: when the controller is uninstalled, the managed annotation
+// is left on existing workloads. After a fresh install, CaptureIfAbsent
+// short-circuits on the annotation (lost-snapshot guard) and never captures,
+// leaving those workloads un-rollable-back. This reconciler repairs the gap
+// at startup so the next reconcile can capture a fresh snapshot.
+//
+// Errors are logged but not fatal — one bad workload must not block the rest.
+func reconcileManagedAnnotations(
+	ctx context.Context,
+	cs kubernetes.Interface,
+	operatorNS string,
+	snapClient tscSnapshotLookup,
+) error {
+	if cs == nil || snapClient == nil || operatorNS == "" {
+		return nil
+	}
+	deps, err := cs.AppsV1().Deployments("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list deployments: %w", err)
+	}
+	for i := range deps.Items {
+		d := &deps.Items[i]
+		if d.Annotations[AnnotationTSCManaged] != "true" {
+			continue
+		}
+		if err := reconcileOneManagedWorkload(ctx, cs, snapClient, operatorNS, "Deployment", d.Namespace, d.Name, d.UID); err != nil {
+			logWarn("managed-annot", "Failed to reconcile Deployment %s/%s: %v", d.Namespace, d.Name, err)
+		}
+	}
+	ssets, err := cs.AppsV1().StatefulSets("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list statefulsets: %w", err)
+	}
+	for i := range ssets.Items {
+		s := &ssets.Items[i]
+		if s.Annotations[AnnotationTSCManaged] != "true" {
+			continue
+		}
+		if err := reconcileOneManagedWorkload(ctx, cs, snapClient, operatorNS, "StatefulSet", s.Namespace, s.Name, s.UID); err != nil {
+			logWarn("managed-annot", "Failed to reconcile StatefulSet %s/%s: %v", s.Namespace, s.Name, err)
+		}
+	}
+	return nil
+}
+
+// reconcileOneManagedWorkload checks whether the snapshot CRD for a single
+// managed workload still exists and, if not, removes the managed annotation.
+func reconcileOneManagedWorkload(
+	ctx context.Context,
+	cs kubernetes.Interface,
+	snapClient tscSnapshotLookup,
+	operatorNS, kind, namespace, name string,
+	uid types.UID,
+) error {
+	crdName := snapshot.CollisionSafeName(kind, namespace, name, uid)
+	if _, err := snapClient.Get(ctx, operatorNS, crdName); err == nil {
+		// Snapshot exists, managed annotation is correct.
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get snapshot %s/%s: %w", operatorNS, crdName, err)
+	}
+
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": map[string]interface{}{
+				AnnotationTSCManaged: nil,
+			},
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case "Deployment":
+		_, err = cs.AppsV1().Deployments(namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+	case "StatefulSet":
+		_, err = cs.AppsV1().StatefulSets(namespace).Patch(ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+	}
+	if err != nil {
+		return fmt.Errorf("patch %s %s/%s: %w", kind, namespace, name, err)
+	}
+	logWarn("managed-annot-stripped", "Removed stale %s annotation from %s %s/%s (snapshot %s/%s missing)", AnnotationTSCManaged, kind, namespace, name, operatorNS, crdName)
+	return nil
+}
+
 func createTSCForWorkload(ctx context.Context, kind, namespace, name string, annotations, labels map[string]string, replicas int, uid types.UID) {
 	key := fmt.Sprintf("%s/%s/%s", kind, namespace, name)
 
@@ -735,7 +837,7 @@ func captureTSCOriginalWithCurrent(ctx context.Context, kind, namespace, name st
 		return &workloadsv1.TSCOriginal{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      crdName,
-				Namespace: id.Namespace,
+				Namespace: config.OperatorNamespace,
 				Labels: map[string]string{
 					"app.kubernetes.io/managed-by": ControllerName,
 				},
