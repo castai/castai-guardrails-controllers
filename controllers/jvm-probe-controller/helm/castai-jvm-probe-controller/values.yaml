@@ -106,10 +106,13 @@ management:
   rollbackOnDisable: false
 
   # Operation mode (orthogonal to enabled):
-  #   apply     — controller mutates workloads (default, today's behaviour).
+  #   apply     — controller mutates workloads.
   #   recommend — controller observes and captures snapshots but does NOT
-  #               patch. Useful for first-Prod-install dry run.
-  mode: apply
+  #               patch. This is the default so a fresh install captures
+  #               original workload state without mutating workloads;
+  #               operators must explicitly patch management.mode to apply
+  #               before the controller makes changes.
+  mode: recommend
 
 # CRD chart control — set false only if you install CRDs out-of-band.
 # Defaults to false because install.sh installs CRDs as a separate release
@@ -191,10 +194,13 @@ management:
   rollbackOnDisable: false
 
   # Operation mode (orthogonal to enabled):
-  #   apply     — controller mutates workloads (default, today's behaviour).
+  #   apply     — controller mutates workloads.
   #   recommend — controller observes and captures snapshots but does NOT
-  #               patch. Useful for first-Prod-install dry run.
-  mode: apply
+  #               patch. This is the default so a fresh install captures
+  #               original workload state without mutating workloads;
+  #               operators must explicitly patch management.mode to apply
+  #               before the controller makes changes.
+  mode: recommend
 
 # CRD chart control — set false only if you install CRDs out-of-band.
 # Defaults to false because install.sh installs CRDs as a separate release

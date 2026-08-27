@@ -39,8 +39,10 @@ INSTALL_PDB="${INSTALL_PDB:-}"
 
 # Per-controller overrides (non-interactive only — interactive uses defaults)
 # Mode is canonical: "apply" (mutate workloads) or "recommend" (snapshot only).
-TSC_MODE="${TSC_MODE:-apply}"
-JVM_MODE="${JVM_MODE:-apply}"
+# Default is "recommend" so a fresh install captures original workload state
+# without mutating workloads; operators must explicitly opt in to apply.
+TSC_MODE="${TSC_MODE:-recommend}"
+JVM_MODE="${JVM_MODE:-recommend}"
 TSC_IMAGE_TAG_OVERRIDE="${TSC_IMAGE_TAG:-}"
 JVM_IMAGE_TAG_OVERRIDE="${JVM_IMAGE_TAG:-}"
 PDB_IMAGE_TAG_OVERRIDE="${PDB_IMAGE_TAG:-}"
@@ -684,7 +686,7 @@ echo "============================================================"
 echo " Next steps"
 echo "============================================================"
 echo ""
-step "Enable automation (apply mode):"
+step "Enable apply mode (default after install is recommend — controllers only snapshot):"
 echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config       --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\",\"mode\":\"apply\"}}'"
 echo "    kubectl -n ${NAMESPACE} patch cm castai-jvm-probe-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\",\"mode\":\"apply\"}}'"
 echo ""
