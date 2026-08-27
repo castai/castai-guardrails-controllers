@@ -125,6 +125,7 @@ func main() {
 	// Wire snapshot clients now that we know the operator namespace.
 	tscClient = snapshot.NewTSCClientFromClient(workloadsClient, config.OperatorNamespace)
 	tscAccessor = snapshot.NewTSCAccessor()
+	logInfo("snapshot-client", "Snapshot client wired for namespace %s", config.OperatorNamespace)
 
 	// Setup signal handling
 	sigCh := make(chan os.Signal, 1)
@@ -614,7 +615,7 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 			}
 		}
 	}
-	captureTSCOriginalWithCurrent(ctx, kind, namespace, name, annotations, uid, current, currentPresent)
+	captureTSCOriginalWithCurrent(ctx, kind, namespace, name, annotations, uid, current, currentPresent, nil, false)
 
 	if mode == ModeRecommend {
 		logInfo("tsc-recommend", "[RECOMMEND] Would add %d TSC(s) to %s", len(constraints), key)
@@ -670,6 +671,26 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 		logWarn("tsc-managed-annot", "Failed to set managed annotation on %s: %v", key, err)
 	}
 
+	// Re-fetch the live workload and record the applied TSCs on the
+	// existing snapshot. The pre-patch capture set OriginalTSCs and was a
+	// no-op when a Ready snapshot already existed; we update applied state
+	// in-place via Get+Update so CaptureIfAbsent's "skip when Ready" rule
+	// doesn't drop the post-patch write.
+	switch kind {
+	case "Deployment":
+		if d, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{}); err == nil {
+			applied := d.Spec.Template.Spec.TopologySpreadConstraints
+			appliedPresent := d.Spec.Template.Spec.TopologySpreadConstraints != nil
+			recordAppliedTSCs(ctx, kind, namespace, name, uid, applied, appliedPresent)
+		}
+	case "StatefulSet":
+		if s, err := clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{}); err == nil {
+			applied := s.Spec.Template.Spec.TopologySpreadConstraints
+			appliedPresent := s.Spec.Template.Spec.TopologySpreadConstraints != nil
+			recordAppliedTSCs(ctx, kind, namespace, name, uid, applied, appliedPresent)
+		}
+	}
+
 	workloadsLock.Lock()
 	processedWorkloads[key] = true
 	workloadsLock.Unlock()
@@ -683,8 +704,11 @@ func createTSCForWorkload(ctx context.Context, kind, namespace, name string, ann
 }
 
 // captureTSCOriginalWithCurrent is the inner capture helper that takes an
-// already-fetched "current TSCs" list and Present flag.
-func captureTSCOriginalWithCurrent(ctx context.Context, kind, namespace, name string, annotations map[string]string, uid types.UID, current []corev1.TopologySpreadConstraint, present bool) {
+// already-fetched "current TSCs" list and Present flag. applied/appliedPresent
+// are recorded when capture happens after the controller's patch succeeded;
+// pre-patch callers pass nil/false and update the existing snapshot via
+// recordAppliedTSCs after the patch instead.
+func captureTSCOriginalWithCurrent(ctx context.Context, kind, namespace, name string, annotations map[string]string, uid types.UID, current []corev1.TopologySpreadConstraint, present bool, applied []corev1.TopologySpreadConstraint, appliedPresent bool) {
 	configLock.RLock()
 	enabled := config.SnapshotEnabled
 	controllerVersion := config.Version
@@ -726,6 +750,8 @@ func captureTSCOriginalWithCurrent(ctx context.Context, kind, namespace, name st
 				},
 				OriginalTSCs:        current,
 				OriginalTSCsPresent: present,
+				AppliedTSCs:         applied,
+				AppliedTSCsPresent:  appliedPresent,
 				CapturedAt:          metav1.Now(),
 				ControllerVersion:   controllerVersion,
 			},
@@ -742,6 +768,33 @@ func captureTSCOriginalWithCurrent(ctx context.Context, kind, namespace, name st
 	); err != nil {
 		logError("capture", "Capture failed for %s/%s/%s: %v", kind, namespace, name, err)
 	}
+}
+
+// recordAppliedTSCs updates the Spec.AppliedTSCs/AppliedTSCsPresent fields of
+// the existing snapshot in-place. CaptureIfAbsent is a no-op when a Ready
+// snapshot already exists, so post-patch applied-state writes must go through
+// Get+Update directly.
+func recordAppliedTSCs(ctx context.Context, kind, namespace, name string, uid types.UID, applied []corev1.TopologySpreadConstraint, appliedPresent bool) {
+	if tscClient == nil || tscAccessor == nil {
+		return
+	}
+	configLock.RLock()
+	operatorNS := config.OperatorNamespace
+	configLock.RUnlock()
+
+	crdName := snapshot.CollisionSafeName(kind, namespace, name, uid)
+	existing, err := tscClient.Get(ctx, operatorNS, crdName)
+	if err != nil {
+		logWarn("applied-tsc", "Failed to load snapshot %s/%s for applied TSC update: %v", operatorNS, crdName, err)
+		return
+	}
+	existing.Spec.AppliedTSCs = applied
+	existing.Spec.AppliedTSCsPresent = appliedPresent
+	if _, err := tscClient.Update(ctx, operatorNS, existing); err != nil {
+		logWarn("applied-tsc", "Failed to update snapshot %s/%s with applied TSCs: %v", operatorNS, crdName, err)
+		return
+	}
+	logInfo("applied-tsc", "Recorded applied TSCs on snapshot %s/%s", operatorNS, crdName)
 }
 
 // markWorkloadManaged sets the workloads.cast.ai/tsc-managed=true annotation

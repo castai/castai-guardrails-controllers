@@ -28,12 +28,12 @@ type WorkloadsV1Client struct {
 
 // NewForConfig creates a new WorkloadsV1Client backed by the given REST config.
 func NewForConfig(c *rest.Config) (*WorkloadsV1Client, error) {
-	cfg := *c
+	cfg := rest.CopyConfig(c)
 	cfg.ContentConfig.GroupVersion = &groupVersion
 	cfg.APIPath = "/apis"
 	cfg.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
 	cfg.UserAgent = rest.DefaultKubernetesUserAgent() + " castai-guardrails-controllers/clientset/v0.0.0"
-	client, err := rest.RESTClientForConfigAndClient(&cfg, nil)
+	client, err := rest.RESTClientForConfigAndClient(cfg, nil)
 	if err != nil {
 		return nil, err
 	}
