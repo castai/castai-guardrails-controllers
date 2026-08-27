@@ -317,39 +317,32 @@ checkbox_menu() {
   local -a checked
   local i
   for ((i = 0; i < n; i++)); do checked[i]=0; done
-
   local cursor=0
 
-  # Save current stty state; restore on any exit path
   local saved_stty
-  saved_stty="$(stty -g </dev/tty)"
+  saved_stty="$(stty -g </dev/tty 2>/dev/null || true)"
+
+  cleanup() {
+    stty "$saved_stty" </dev/tty 2>/dev/null || true
+    printf '\033[?25h' >/dev/tty 2>/dev/null || true
+  }
   # shellcheck disable=SC2064
-  trap "stty '$saved_stty' </dev/tty; printf '\033[?25h' >/dev/tty" RETURN INT TERM
+  trap "cleanup" RETURN INT TERM
 
-  stty -echo -icanon min 1 time 0 </dev/tty
-  printf '\033[?25l' >/dev/tty   # hide cursor
+  stty -echo -icanon min 1 time 0 </dev/tty 2>/dev/null || true
 
-  # Initial render: print title + one line per item + a footer
-  {
-    printf '\n'
-    printf '  %s\n' "$title"
-    printf '  %s\n' "$(printf '%.0s─' $(seq 1 60))"
-    for ((i = 0; i < n; i++)); do printf '\n'; done
-    printf '\n'
-    printf '  \033[2m↑/↓ or j/k navigate  ·  Space toggles  ·  Enter confirms  ·  Ctrl-C cancels\033[0m\n'
-  } >/dev/tty
-
-  local footer_lines=3   # blank + hint + trailing blank room
-  local total_lines=$((n + 3 + footer_lines - 1))
-
-  redraw() {
-    # Move cursor up to the first item line
-    printf '\033[%dA' "$total_lines" >/dev/tty
-    # Skip the title (1) + separator (1) + leading blank (1) = 3 lines
-    printf '\033[3B' >/dev/tty
-
+  draw() {
+    # Clear screen and move cursor to top-left, then re-render the full menu.
+    # This avoids duplicated lines on terminals that do not implement
+    # save/restore-cursor reliably (the old approach leaked through on some
+    # narrow terminals). Output goes to /dev/tty so backgrounded / piped
+    # callers do not interfere with the menu.
+    printf '\033[2J\033[H' >/dev/tty
+    printf '\n' >/dev/tty
+    printf '  %s\n' "$title" >/dev/tty
+    printf '  %s\n' "$(printf '%.0s─' $(seq 1 60))" >/dev/tty
+    local i
     for ((i = 0; i < n; i++)); do
-      printf '\r\033[2K' >/dev/tty         # clear line
       local mark=' '; [ "${checked[i]}" -eq 1 ] && mark='x'
       if [ "$i" -eq "$cursor" ]; then
         printf '  \033[36m❯\033[0m [\033[32m%s\033[0m] %s\n' "$mark" "${items[i]}" >/dev/tty
@@ -357,11 +350,11 @@ checkbox_menu() {
         printf '    [%s] %s\n' "$mark" "${items[i]}" >/dev/tty
       fi
     done
-    # Move cursor back down past footer to leave prompt below
-    printf '\033[%dB' "$footer_lines" >/dev/tty
+    printf '\n' >/dev/tty
+    printf '  \033[2m↑/↓ or j/k navigate  ·  Space toggles  ·  Enter confirms  ·  Ctrl-C cancels\033[0m\n' >/dev/tty
   }
 
-  redraw
+  draw
 
   # Read loop — one byte at a time; decode arrow-key CSI sequences.
   #
@@ -369,41 +362,44 @@ checkbox_menu() {
   # so we cannot use `read -t 0.001` to peek the ESC-[ tail of an arrow key.
   # Instead we switch the tty to a very short VMIN/VTIME poll (0 chars, 1 decisecond)
   # right before the CSI peek, then restore blocking mode. This works on any
-  # POSIX stty and any bash version.
+  # POSIX stty and any bash version. All stty calls tolerate failure so a
+  # missing / unavailable /dev/tty (e.g. headless CI) does not produce
+  # spurious "Input/output error" messages.
   local key esc1 esc2
   while :; do
     IFS= read -rsn1 key </dev/tty || break
     case "$key" in
       $'\x1b')  # ESC — could be lone Esc or start of CSI (arrow)
-        # Non-blocking peek for the next two bytes.
-        stty min 0 time 1 </dev/tty          # up to 100 ms wait, then bail
+        stty min 0 time 1 </dev/tty 2>/dev/null || true
         esc1=''; esc2=''
         IFS= read -rsn1 esc1 </dev/tty || true
         IFS= read -rsn1 esc2 </dev/tty || true
-        stty min 1 time 0 </dev/tty          # back to blocking for the main loop
+        stty min 1 time 0 </dev/tty 2>/dev/null || true
         if [ "$esc1" = '[' ]; then
           case "$esc2" in
-            A) [ "$cursor" -gt 0 ] && cursor=$((cursor - 1)); redraw ;;
-            B) [ "$cursor" -lt $((n - 1)) ] && cursor=$((cursor + 1)); redraw ;;
+            A) [ "$cursor" -gt 0 ] && cursor=$((cursor - 1)); draw ;;
+            B) [ "$cursor" -lt $((n - 1)) ] && cursor=$((cursor + 1)); draw ;;
           esac
         fi
         # bare Esc: ignore
         ;;
-      j) [ "$cursor" -lt $((n - 1)) ] && cursor=$((cursor + 1)); redraw ;;
-      k) [ "$cursor" -gt 0 ] && cursor=$((cursor - 1)); redraw ;;
+      j) [ "$cursor" -lt $((n - 1)) ] && cursor=$((cursor + 1)); draw ;;
+      k) [ "$cursor" -gt 0 ] && cursor=$((cursor - 1)); draw ;;
       ' ')
         checked[cursor]=$((1 - checked[cursor]))
-        redraw
+        draw
         ;;
       '')  # Enter (empty read via -n1 on newline)
         break
         ;;
+      *)
+        # Unknown key: redraw to stay in sync with terminal state.
+        draw
+        ;;
     esac
   done
 
-  # Restore terminal state (also restored on RETURN via trap)
-  stty "$saved_stty" </dev/tty
-  printf '\033[?25h' >/dev/tty
+  cleanup
   trap - RETURN INT TERM
   printf '\n' >/dev/tty
 
@@ -683,4 +679,33 @@ step "Bypass a single workload with an annotation:"
 echo "    workloads.cast.ai/tsc-bypass: \"true\""
 echo "    workloads.cast.ai/jvm-probe-bypass: \"true\""
 echo "    workloads.cast.ai/bypass-default-pdb: \"true\""
+echo ""
+echo "============================================================"
+echo " Next steps"
+echo "============================================================"
+echo ""
+step "Enable/disable automation:"
+echo "    kubectl patch configmap castai-tsc-controller-config -n ${NAMESPACE} --type merge \\"
+echo "      -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\"}}'"
+echo "    kubectl patch configmap castai-jvm-probe-controller-config -n ${NAMESPACE} --type merge \\"
+echo "      -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\"}}'"
+echo ""
+step "Disable and rollback changes:"
+echo "    kubectl patch configmap castai-tsc-controller-config -n ${NAMESPACE} --type merge \\"
+echo "      -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
+echo "    kubectl patch configmap castai-jvm-probe-controller-config -n ${NAMESPACE} --type merge \\"
+echo "      -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
+echo ""
+step "Dry-run / recommend mode (capture snapshots but do not patch):"
+echo "    kubectl patch configmap castai-tsc-controller-config -n ${NAMESPACE} --type merge \\"
+echo "      -p '{\"data\":{\"managementEnabled\":\"true\",\"mode\":\"recommend\"}}'"
+echo ""
+step "Verify snapshots:"
+echo "    kubectl get tscoriginals -n ${NAMESPACE}"
+echo "    kubectl get jvmprobeoriginals -n ${NAMESPACE}"
+echo ""
+step "Check rollback status:"
+echo "    kubectl get tscoriginals -n ${NAMESPACE} -o jsonpath='{range .items[*]}{.metadata.name}{\"\t\"}{.status.conditions[?(@.type==\"RolledBack\")].status}{\"\n\"}{end}'"
+echo ""
+step "See docs/rollback-operator-runbook.md for the full runbook."
 echo "============================================================"
