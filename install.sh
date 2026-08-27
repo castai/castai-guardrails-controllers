@@ -38,9 +38,9 @@ INSTALL_JVM="${INSTALL_JVM:-}"
 INSTALL_PDB="${INSTALL_PDB:-}"
 
 # Per-controller overrides (non-interactive only — interactive uses defaults)
-TSC_DRY_RUN="${TSC_DRY_RUN:-true}"
-JVM_DRY_RUN="${JVM_DRY_RUN:-true}"
-PDB_DRY_RUN="${PDB_DRY_RUN:-true}"
+# Mode is canonical: "apply" (mutate workloads) or "recommend" (snapshot only).
+TSC_MODE="${TSC_MODE:-apply}"
+JVM_MODE="${JVM_MODE:-apply}"
 TSC_IMAGE_TAG_OVERRIDE="${TSC_IMAGE_TAG:-}"
 JVM_IMAGE_TAG_OVERRIDE="${JVM_IMAGE_TAG:-}"
 PDB_IMAGE_TAG_OVERRIDE="${PDB_IMAGE_TAG:-}"
@@ -156,8 +156,8 @@ log_install_failure() {
     echo "INSTALL_TSC=${INSTALL_TSC:-false}"
     echo "INSTALL_JVM=${INSTALL_JVM:-false}"
     echo "INSTALL_PDB=${INSTALL_PDB:-false}"
-    [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_DRY_RUN=${TSC_DRY_RUN}"
-    [ "${INSTALL_JVM:-false}" = true ] && echo "  JVM_DRY_RUN=${JVM_DRY_RUN}"
+    [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_MODE=${TSC_MODE}"
+    [ "${INSTALL_JVM:-false}" = true ] && echo "  JVM_MODE=${JVM_MODE}"
     echo ""
     echo "--- Helm command ---"
     printf 'helm'
@@ -454,34 +454,34 @@ INSTALL_JVM="${INSTALL_JVM:-false}"
 INSTALL_PDB="${INSTALL_PDB:-false}"
 
 # -------------------------
-# Dry-run prompts (per controller)
+# Mode prompts (per controller)
 # -------------------------
-configure_dry_run() {
-  # configure_dry_run <PREFIX> <default>
+configure_mode() {
+  # configure_mode <PREFIX> <default>
   local prefix="$1"
-  local default_dry="$2"
-  local current_dry="$default_dry"
-  local current_dry_var="${prefix}_DRY_RUN"
+  local default_mode="$2"
+  local current_mode="$default_mode"
+  local current_mode_var="${prefix}_MODE"
 
   # Allow non-interactive override via env
-  if [ -n "${!current_dry_var:-}" ]; then
-    eval "current_dry=\"${current_dry_var}\""
+  if [ -n "${!current_mode_var:-}" ]; then
+    eval "current_mode=\"${!current_mode_var}\""
     return
   fi
 
   if [ "$IS_INTERACTIVE" = true ]; then
-    if confirm "  Install ${prefix} in dry-run mode? (logs intended changes, no mutations)" y; then
-      current_dry="true"
+    if confirm "  Install ${prefix} in apply mode? (recommend mode snapshots workloads without mutating)" y; then
+      current_mode="apply"
     else
-      current_dry="false"
+      current_mode="recommend"
     fi
   fi
-  eval "${current_dry_var}=\"${current_dry}\""
+  eval "${current_mode_var}=\"${current_mode}\""
 }
 
-[ "$INSTALL_TSC" = true ] && configure_dry_run TSC "$TSC_DRY_RUN"
-[ "$INSTALL_JVM" = true ] && configure_dry_run JVM "$JVM_DRY_RUN"
-# PDB has no dry-run mode; FixPoorPDBs is enabled by default (controller is live on install).
+[ "$INSTALL_TSC" = true ] && configure_mode TSC "$TSC_MODE"
+[ "$INSTALL_JVM" = true ] && configure_mode JVM "$JVM_MODE"
+# PDB has no mode toggle; FixPoorPDBs is enabled by default (controller is live on install).
 
 # -------------------------
 # Confirmation
@@ -493,8 +493,8 @@ if [ "$IS_INTERACTIVE" = true ]; then
   echo "============================================================"
   echo "  Namespace : ${NAMESPACE}"
   echo "  Cluster   : ${CLUSTER_NAME}"
-  [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_IMAGE_TAG_OVERRIDE:-$TSC_TAG_DEFAULT}  dryRun=${TSC_DRY_RUN}"
-  [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-$JVM_TAG_DEFAULT}  dryRun=${JVM_DRY_RUN}"
+  [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_IMAGE_TAG_OVERRIDE:-$TSC_TAG_DEFAULT}  mode=${TSC_MODE}"
+  [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-$JVM_TAG_DEFAULT}  mode=${JVM_MODE}"
   [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_IMAGE_TAG_OVERRIDE:-$PDB_TAG_DEFAULT}  FixPoorPDBs=true (live)"
   echo ""
 
@@ -563,11 +563,11 @@ fi
 # Install controller helper
 # -------------------------
 install_chart() {
-  # install_chart <release> <chart_dir> <app_version> <dry_run> <prefix>
+  # install_chart <release> <chart_dir> <app_version> <mode> <prefix>
   local release="$1"
   local chart="$2"
   local app_version="$3"
-  local dry="$4"
+  local mode="$4"
   local prefix="$5"
 
   # Resolve tag: env-var override (non-interactive) > latest matching git tag > appVersion
@@ -580,7 +580,7 @@ install_chart() {
     image_tag="${!default_var}"
   fi
 
-  step "Installing ${release} (tag=${image_tag}, dryRun=${dry})"
+  step "Installing ${release} (tag=${image_tag}, mode=${mode})"
 
   # Build helm args as array (safe)
   local -a args
@@ -589,24 +589,23 @@ install_chart() {
         --set image.tag="$image_tag"
         --set image.pullPolicy="$IMAGE_PULL_POLICY"
         --set replicaCount=2
+        --set management.enabled=true
+        --set management.mode="$mode"
+        --set management.rollbackOnDisable=false
         --create-namespace)
 
-  # Controller-specific: dry-run propagation
+  # Controller-specific: CRD ownership and additional config.
   case "$prefix" in
     TSC)
       # CRDs are installed as a standalone release (castai-guardrails-crds) by
       # install.sh to avoid ownership conflicts between controllers.
-      args+=(--set config.dryRun="$dry" --set config.enableTSCManagement="true"
-             --set crds.enabled=false) ;;
+      args+=(--set crds.enabled=false) ;;
     JVM)
       # CRDs are installed as a standalone release (castai-guardrails-crds) by
       # install.sh to avoid ownership conflicts between controllers.
-      args+=(--set config.dryRun="$dry"
-             --set config.logIntendedChanges="$dry"
-             --set config.enableProbeManagement="true"
-             --set crds.enabled=false) ;;
+      args+=(--set crds.enabled=false) ;;
     PDB)
-      # PDB has no dry-run mode. FixPoorPDBs is enabled by default so the
+      # PDB has no mode toggle. FixPoorPDBs is enabled by default so the
       # controller auto-remediates poor PDBs immediately on install.
       args+=(--set config.FixPoorPDBs="true")
       ;;
@@ -632,13 +631,13 @@ install_chart() {
 # Run installations
 # -------------------------
 if [ "$INSTALL_TSC" = true ]; then
-  install_chart castai-tsc-controller      "$TSC_CHART" "$TSC_APP" "$TSC_DRY_RUN" TSC
+  install_chart castai-tsc-controller      "$TSC_CHART" "$TSC_APP" "$TSC_MODE" TSC
 fi
 if [ "$INSTALL_JVM" = true ]; then
-  install_chart castai-jvm-probe-controller "$JVM_CHART" "$JVM_APP" "$JVM_DRY_RUN" JVM
+  install_chart castai-jvm-probe-controller "$JVM_CHART" "$JVM_APP" "$JVM_MODE" JVM
 fi
 if [ "$INSTALL_PDB" = true ]; then
-  install_chart castai-pdb-controller     "$PDB_CHART" "$PDB_APP" "$PDB_DRY_RUN" PDB
+  install_chart castai-pdb-controller     "$PDB_CHART" "$PDB_APP" "" PDB
 fi
 
 # -------------------------
@@ -673,9 +672,9 @@ echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-tsc-cont
 echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-jvm-probe-controller --tail=50 -f"
 echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-pdb-controller      --tail=50 -f"
 echo ""
-step "Go live (turn off dry-run) — TSC & JVM (ConfigMap hot-reloads, no restart needed):"
-echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config       --type merge -p '{\"data\":{\"dryRun\":\"false\"}}'"
-echo "    kubectl -n ${NAMESPACE} patch cm castai-jvm-probe-controller-config --type merge -p '{\"data\":{\"jvm-dryRun\":\"false\"}}'"
+step "Go live — TSC & JVM (ConfigMap hot-reloads, no restart needed):"
+echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config       --type merge -p '{\"data\":{\"mode\":\"apply\"}}'"
+echo "    kubectl -n ${NAMESPACE} patch cm castai-jvm-probe-controller-config --type merge -p '{\"data\":{\"mode\":\"apply\"}}'"
 echo ""
 step "PDB is live by default (FixPoorPDBs=true). To re-apply via Helm:"
 echo "    helm upgrade castai-pdb-controller ${PDB_CHART} -n ${NAMESPACE} --set config.FixPoorPDBs=\"true\""
@@ -689,21 +688,17 @@ echo "============================================================"
 echo " Next steps"
 echo "============================================================"
 echo ""
-step "Enable/disable automation:"
-echo "    kubectl patch configmap castai-tsc-controller-config -n ${NAMESPACE} --type merge \\"
-echo "      -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\"}}'"
-echo "    kubectl patch configmap castai-jvm-probe-controller-config -n ${NAMESPACE} --type merge \\"
-echo "      -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\"}}'"
+step "Enable automation (apply mode):"
+echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config       --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\",\"mode\":\"apply\"}}'"
+echo "    kubectl -n ${NAMESPACE} patch cm castai-jvm-probe-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\",\"mode\":\"apply\"}}'"
 echo ""
 step "Disable and rollback changes:"
-echo "    kubectl patch configmap castai-tsc-controller-config -n ${NAMESPACE} --type merge \\"
-echo "      -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
-echo "    kubectl patch configmap castai-jvm-probe-controller-config -n ${NAMESPACE} --type merge \\"
-echo "      -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
+echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config       --type merge -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
+echo "    kubectl -n ${NAMESPACE} patch cm castai-jvm-probe-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
 echo ""
-step "Dry-run / recommend mode (capture snapshots but do not patch):"
-echo "    kubectl patch configmap castai-tsc-controller-config -n ${NAMESPACE} --type merge \\"
-echo "      -p '{\"data\":{\"managementEnabled\":\"true\",\"mode\":\"recommend\"}}'"
+step "Recommend mode (capture snapshots but do not patch):"
+echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config       --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"mode\":\"recommend\"}}'"
+echo "    kubectl -n ${NAMESPACE} patch cm castai-jvm-probe-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"mode\":\"recommend\"}}'"
 echo ""
 step "Verify snapshots:"
 echo "    kubectl get tscoriginals -n ${NAMESPACE}"
