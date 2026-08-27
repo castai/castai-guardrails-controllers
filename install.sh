@@ -9,9 +9,10 @@
 #   - Installs via Helm from local charts in ./controllers/
 #   - Verifies rollout
 #
-# Image tag defaults to "latest" (most recent build pushed to the registry).
-# Override with TSC_IMAGE_TAG=..., JVM_IMAGE_TAG=..., PDB_IMAGE_TAG=... in
-# non-interactive mode.
+# Image tag defaults to the version suffix of the latest matching git release
+# tag (e.g. tsc-v0.0.3 -> 0.0.3). Falls back to Chart.yaml appVersion when no
+# matching tag exists. Override with TSC_IMAGE_TAG=..., JVM_IMAGE_TAG=...,
+# PDB_IMAGE_TAG=... in non-interactive mode.
 #
 # Interactive by default; non-interactive when INSTALL_* env vars
 # are preset (matches castctl --non-interactive).
@@ -254,7 +255,7 @@ CRDS_CHART="${SCRIPT_DIR}/controllers/crds/helm/castai-guardrails-crds"
 [ -d "$CRDS_CHART" ] || fatal "CRDs chart not found at $CRDS_CHART"
 
 # -------------------------
-# Read appVersion from Chart.yaml (kept for display; not the image tag default)
+# Read appVersion from Chart.yaml (used as image tag fallback)
 # -------------------------
 chart_app_version() {
   local chart_dir="$1"
@@ -265,6 +266,29 @@ chart_app_version() {
 TSC_APP="$(chart_app_version "$TSC_CHART")"
 JVM_APP="$(chart_app_version "$JVM_CHART")"
 PDB_APP="$(chart_app_version "$PDB_CHART")"
+
+# -------------------------
+# Resolve latest git release tag version for a controller
+# -------------------------
+# latest_git_tag_version <prefix> <app_version>
+# Returns the version suffix of the most recent matching git tag (e.g. for
+# prefix=tsc and tag tsc-v0.0.3, returns 0.0.3). Falls back to <app_version>
+# when no matching tag exists in the repo.
+latest_git_tag_version() {
+  local prefix="$1"
+  local app_version="$2"
+  local tag
+  tag="$(git -C "$SCRIPT_DIR" tag --list "${prefix}-v*" --sort=-v:refname 2>/dev/null | head -n1)"
+  if [ -n "$tag" ]; then
+    echo "${tag#${prefix}-v}"
+  else
+    echo "$app_version"
+  fi
+}
+
+TSC_TAG_DEFAULT="$(latest_git_tag_version "tsc" "$TSC_APP")"
+JVM_TAG_DEFAULT="$(latest_git_tag_version "jvm" "$JVM_APP")"
+PDB_TAG_DEFAULT="$(latest_git_tag_version "pdb" "$PDB_APP")"
 
 # -------------------------
 # Determine if interactive
@@ -468,9 +492,9 @@ if [ "$IS_INTERACTIVE" = true ]; then
   echo "============================================================"
   echo "  Namespace : ${NAMESPACE}"
   echo "  Cluster   : ${CLUSTER_NAME}"
-  [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_IMAGE_TAG_OVERRIDE:-latest}  dryRun=${TSC_DRY_RUN}"
-  [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-latest}  dryRun=${JVM_DRY_RUN}"
-  [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_IMAGE_TAG_OVERRIDE:-latest}  FixPoorPDBs=true (live)"
+  [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_IMAGE_TAG_OVERRIDE:-$TSC_TAG_DEFAULT}  dryRun=${TSC_DRY_RUN}"
+  [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-$JVM_TAG_DEFAULT}  dryRun=${JVM_DRY_RUN}"
+  [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_IMAGE_TAG_OVERRIDE:-$PDB_TAG_DEFAULT}  FixPoorPDBs=true (live)"
   echo ""
 
   if ! confirm "Proceed with installation?" y; then
@@ -545,13 +569,14 @@ install_chart() {
   local dry="$4"
   local prefix="$5"
 
-  # Resolve tag: env-var override (non-interactive) > "latest" (registry default)
+  # Resolve tag: env-var override (non-interactive) > latest matching git tag > appVersion
   local override_var="${prefix}_IMAGE_TAG_OVERRIDE"
+  local default_var="${prefix}_TAG_DEFAULT"
   local image_tag
   if [ -n "${!override_var:-}" ]; then
     eval "image_tag=\"\${${override_var}}\""
   else
-    image_tag="latest"
+    image_tag="${!default_var}"
   fi
 
   step "Installing ${release} (tag=${image_tag}, dryRun=${dry})"
