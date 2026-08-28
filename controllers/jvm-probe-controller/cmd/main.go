@@ -68,6 +68,11 @@ var (
 
 	jvmClient   *snapshot.JVMClient
 	jvmAccessor *snapshot.Accessor[*workloadsv1.JVMProbeOriginal]
+
+	// lastRollbackRun is the wall-clock time of the most recent rollback
+	// attempt; rate-limits the reconcile-time retry of pending rollbacks.
+	lastRollbackRun   time.Time
+	lastRollbackRunMu sync.Mutex
 )
 
 // init registers flags
@@ -257,6 +262,10 @@ func runJVMRollback() {
 	ns := config.OperatorNamespace
 	configLock.RUnlock()
 
+	lastRollbackRunMu.Lock()
+	lastRollbackRun = time.Now()
+	lastRollbackRunMu.Unlock()
+
 	logger := snapshot.SimpleLogger{
 		Info:  func(format string, args ...interface{}) { logInfo("jvm-snapshot", format, args...) },
 		Warn:  func(format string, args ...interface{}) { logWarn("jvm-snapshot", format, args...) },
@@ -275,6 +284,84 @@ func runJVMRollback() {
 	); err != nil {
 		logError("rollback", "JVM rollback loop had errors: %v", err)
 	}
+}
+
+// rollbackMinInterval bounds how often we re-run rollback from the reconcile
+// loop. The trigger on the true→false transition fires immediately; this is
+// the safety net for snapshots that didn't exist yet at that moment.
+const rollbackMinInterval = 30 * time.Second
+
+// shouldRetryJVMRollback reports whether the current config wants rollback to
+// be applied (managementEnabled=false, rollbackOnDisable=true). Pure config
+// gate; the existence of pending snapshots is checked separately.
+func shouldRetryJVMRollback() bool {
+	configLock.RLock()
+	defer configLock.RUnlock()
+	if config == nil {
+		return false
+	}
+	return !config.ManagementEnabled && config.RollbackOnDisable
+}
+
+// hasPendingJVMRollback returns true if any JVMProbeOriginal snapshot in the
+// operator namespace has a RolledBack condition that is not True.
+//
+// snapshot.Rollback already skips RolledBack=True snapshots, so re-running
+// is safe and idempotent.
+func hasPendingJVMRollback(ctx context.Context) (bool, error) {
+	if jvmClient == nil {
+		return false, nil
+	}
+	configLock.RLock()
+	ns := config.OperatorNamespace
+	configLock.RUnlock()
+	if ns == "" {
+		return false, nil
+	}
+	list, err := jvmClient.List(ctx, ns)
+	if err != nil {
+		return false, err
+	}
+	for _, snap := range list {
+		conds := jvmAccessor.GetConditions(snap)
+		if !snapshot.IsRolledBack(conds) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// tryRetryJVMRollback re-runs the rollback loop if there are pending snapshots
+// and the previous attempt was at least rollbackMinInterval ago. Safety net so
+// snapshots created after the managementEnabled true→false transition still
+// get rolled back.
+func tryRetryJVMRollback(ctx context.Context) {
+	if !shouldRetryJVMRollback() {
+		return
+	}
+
+	pending, err := hasPendingJVMRollback(ctx)
+	if err != nil {
+		logWarn("rollback-retry", "Failed to list JVM snapshots for pending-rollback check: %v", err)
+		return
+	}
+	if !pending {
+		return
+	}
+
+	lastRollbackRunMu.Lock()
+	last := lastRollbackRun
+	allowNow := time.Since(last) >= rollbackMinInterval
+	if allowNow {
+		lastRollbackRun = time.Now()
+	}
+	lastRollbackRunMu.Unlock()
+	if !allowNow {
+		return
+	}
+
+	logInfo("rollback-retry", "Retrying JVM rollback for snapshots not yet marked RolledBack")
+	runJVMRollback()
 }
 
 // captureJVMOriginal captures the per-container probes on a workload before
@@ -1098,6 +1185,7 @@ func (c *Controller) runPeriodicReconciliation(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			tryRetryJVMRollback(ctx)
 			logInfo("reconcile", "Starting periodic reconciliation")
 			c.reconcileAllProbes(ctx)
 		}
