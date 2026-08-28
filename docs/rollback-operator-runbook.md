@@ -14,7 +14,9 @@
 | Verify a rollback actually happened | `kubectl get tscoriginals,jvmprobeoriginals -n castai-agent` — look for `RolledBack=True` in the printer columns. |
 | Recover from an accidental in-place patch | Edit the workload directly with `kubectl patch` using the inverse patch shape below. |
 
-All keys live in the per-controller ConfigMap in `castai-agent` (default name: `castai-tsc-controller-config`, `castai-jvm-probe-controller-config`). Hot-reloaded — no controller restart required.
+All keys live in the per-controller ConfigMap in `castai-agent` (default name: `castai-tsc-controller-config`, `castai-jvm-probe-controller-config`). The controller hot-reloads the ConfigMap, so no restart is required for the change to take effect.
+
+> **Helm upgrades vs. `kubectl patch`**: the Helm charts include a `checksum/config` pod annotation. Running `helm upgrade` therefore rolls the controller pods automatically when the ConfigMap changes. If you edit the ConfigMap directly with `kubectl patch`, the pods are **not** restarted automatically; either wait for the hot-reload to apply (usually within seconds) or run `kubectl rollout restart deployment/<controller> -n castai-agent` if the controller appears stale.
 
 ---
 

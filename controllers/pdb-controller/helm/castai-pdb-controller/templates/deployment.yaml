@@ -16,12 +16,13 @@ spec:
       {{- include "castai-pdb-controller.labels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        checksum/config: {{ include "castai-pdb-controller.config" . | sha256sum }}
+        {{- with .Values.pod.annotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       labels:
         {{- include "castai-pdb-controller.labels" . | nindent 8 }}
-      {{- with .Values.pod.annotations }}
-      annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       {{- with .Values.securityContext.pod }}

@@ -240,7 +240,7 @@ Verify: `kubectl get deploy my-app -o jsonpath='{.spec.template.spec.topologySpr
 | `config.injectReadinessProbe` | Inject readiness probe | `true` |
 | `config.injectStartupProbe` | Inject startup probe | `true` |
 | `config.requireBothProbes` | Inject liveness/readiness only if BOTH missing | `true` |
-| `config.skipIfAnyProbeExists` | Skip if any probe already present | `false` |
+| `config.skipIfAnyProbeExists` | Skip if any probe already present | `true` |
 | `config.frameworks` | Per-framework paths/timing (JSON) | spring-boot/quarkus/micronaut/generic |
 | `config.exclusions` | Regex rules to skip | `[]` |
 
