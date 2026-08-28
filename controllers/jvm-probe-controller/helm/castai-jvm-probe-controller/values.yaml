@@ -82,7 +82,7 @@ config:
 
   # Existing settings
   requireBothProbes: "true"
-  skipIfAnyProbeExists: "false"
+  skipIfAnyProbeExists: "true"
   logInterval: "15m"
   reconcileInterval: "2m"
   exclusions:

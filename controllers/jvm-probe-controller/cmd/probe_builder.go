@@ -84,7 +84,7 @@ func DefaultJVMConfig() JVMConfig {
 		LogInterval:            "15m",
 		ReconcileInterval:      "2m",
 		RequireBothProbes:      true,
-		SkipIfAnyProbeExists:   false,
+		SkipIfAnyProbeExists:   true,
 		// P1: Liveness opt-in (safer default)
 		InjectLivenessProbe:    false,
 		InjectReadinessProbe:   true,

@@ -39,6 +39,9 @@ func TestParseJVMConfig_Defaults(t *testing.T) {
 	if cfg.ReconcileInterval != "2m" {
 		t.Errorf("ReconcileInterval default = %q, want 2m", cfg.ReconcileInterval)
 	}
+	if !cfg.SkipIfAnyProbeExists {
+		t.Errorf("SkipIfAnyProbeExists default = false, want true")
+	}
 }
 
 func TestParseJVMConfig_OverrideManagement(t *testing.T) {
