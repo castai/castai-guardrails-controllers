@@ -73,6 +73,12 @@ var (
 
 	tscClient   *snapshot.TSCClient
 	tscAccessor *snapshot.Accessor[*workloadsv1.TSCOriginal]
+
+	// lastRollbackRun is the wall-clock time of the most recent rollback
+	// attempt, used to rate-limit the reconcile-time retry of pending
+	// rollbacks (see tryRetryRollback).
+	lastRollbackRun   time.Time
+	lastRollbackRunMu sync.Mutex
 )
 
 type ExclusionRule struct {
@@ -378,6 +384,9 @@ func maybeTriggerRollback(ctx context.Context, oldState, newState RollbackState)
 func runRollback(ctx context.Context) {
 	logger := snapshot.SimpleLogger{Info: logInfoSimple, Warn: logWarnSimple, Error: logErrorSimple}
 	ns := config.OperatorNamespace
+	lastRollbackRunMu.Lock()
+	lastRollbackRun = time.Now()
+	lastRollbackRunMu.Unlock()
 	if err := snapshot.Rollback(ctx,
 		tscClient,
 		*tscAccessor,
@@ -1159,6 +1168,87 @@ func isExcluded(namespace, name string, labels map[string]string) bool {
 	return false
 }
 
+// rollbackMinInterval bounds how often we re-run rollback from the reconcile
+// loop. The trigger on the true→false transition fires immediately; this is
+// the safety net for snapshots that didn't exist yet at that moment.
+const rollbackMinInterval = 30 * time.Second
+
+// shouldRetryRollback reports whether the current config wants rollback to be
+// applied (managementEnabled=false, rollbackOnDisable=true). It is purely a
+// config gate; the existence of pending snapshots is checked separately.
+func shouldRetryRollback() bool {
+	configLock.RLock()
+	defer configLock.RUnlock()
+	if config == nil {
+		return false
+	}
+	return !config.ManagementEnabled && config.RollbackOnDisable
+}
+
+// hasPendingRollback returns true if any TSCOriginal snapshot in the operator
+// namespace has a RolledBack condition that is not True. Used by the
+// reconcile loop to decide whether to re-run the rollback pass.
+//
+// snapshot.Rollback already skips RolledBack=True snapshots, so re-running
+// is safe and idempotent.
+func hasPendingRollback(ctx context.Context) (bool, error) {
+	if tscClient == nil || workloadsClient == nil {
+		return false, nil
+	}
+	configLock.RLock()
+	ns := config.OperatorNamespace
+	configLock.RUnlock()
+	if ns == "" {
+		return false, nil
+	}
+	list, err := workloadsClient.TSCOriginals(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+	for i := range list.Items {
+		snap := &list.Items[i]
+		conds := tscAccessor.GetConditions(snap)
+		if !snapshot.IsRolledBack(conds) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// tryRetryRollback re-runs the rollback loop if there are pending snapshots
+// (i.e. snapshots without RolledBack=True) and the previous attempt was at
+// least rollbackMinInterval ago. Used as a reconcile-time safety net so
+// snapshots created after the managementEnabled true→false transition still
+// get rolled back.
+func tryRetryRollback(ctx context.Context) {
+	if !shouldRetryRollback() {
+		return
+	}
+
+	pending, err := hasPendingRollback(ctx)
+	if err != nil {
+		logWarn("rollback-retry", "Failed to list snapshots for pending-rollback check: %v", err)
+		return
+	}
+	if !pending {
+		return
+	}
+
+	lastRollbackRunMu.Lock()
+	last := lastRollbackRun
+	allowNow := time.Since(last) >= rollbackMinInterval
+	if allowNow {
+		lastRollbackRun = time.Now()
+	}
+	lastRollbackRunMu.Unlock()
+	if !allowNow {
+		return
+	}
+
+	logInfo("rollback-retry", "Retrying rollback for snapshots not yet marked RolledBack")
+	runRollback(ctx)
+}
+
 func runReconcileLoop(ctx context.Context) {
 	configLock.RLock()
 	interval := config.ReconcileInterval
@@ -1170,6 +1260,7 @@ func runReconcileLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
+			tryRetryRollback(ctx)
 			reconcileAllWorkloads(ctx)
 		case <-ctx.Done():
 			return
