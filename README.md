@@ -4,14 +4,14 @@
 >
 > This repository is **open-source software** and is **not part of the CAST AI product** or a CAST AI commercial offering. It was built by engineers to close real-world reliability gaps — the kind that usually show up when workloads are created quickly, without Kubernetes best practices fully in place.
 >
-> Because these controllers mutate live workloads, your deployment strategy matters: if a workload uses `Recreate` instead of `RollingUpdate`, enabling remediation may cause the workload to recycle. Review your rollout settings and start in dry-run mode.
+> Because these controllers mutate live workloads, your deployment strategy matters: if a workload uses `Recreate` instead of `RollingUpdate`, enabling remediation may cause the workload to recycle. Review your rollout settings and start in **recommend** mode (snapshot-only) before switching to **apply** mode.
 
 Three Kubernetes controllers that **automatically remediate workload configuration** in any cluster. They watch your Deployments and StatefulSets and fix common reliability gaps — missing Pod Disruption Budgets, missing Topology Spread Constraints, and missing/misconfigured JVM health probes — so workloads are spread safely, drain cleanly, and start healthily.
 
 | Controller | What it fixes | Default mode |
 |---|---|---|
-| **TSC Controller** | Missing `topologySpreadConstraints` | Dry-run (observe) |
-| **JVM Probe Controller** | Missing/misconfigured JVM liveness/readiness/**startup** probes | Dry-run (observe) |
+| **TSC Controller** | Missing `topologySpreadConstraints` | **Recommend** (snapshot-only) |
+| **JVM Probe Controller** | Missing/misconfigured JVM liveness/readiness/**startup** probes | **Recommend** (snapshot-only) |
 | **PDB Controller** | Missing/poor `PodDisruptionBudget`s | **Live** (`FixPoorPDBs=true`) |
 
 All three follow the [castai-pdb-controller](https://github.com/castai/castai-pdb-controller) pattern: leader election, shared informers, rate-limited logging, ConfigMap-driven config with hot-reload, and strategic-merge-patch (non-destructive) updates.
@@ -69,7 +69,7 @@ You'll get a menu:
   [5] Cancel
 ```
 
-Pick one or several (e.g. `1 3`), confirm dry-run per controller (TSC/JVM default to dry-run; **PDB installs live**), and the script installs via Helm and waits for rollout.
+Pick one or several (e.g. `1 3`), choose **apply** or **recommend** mode per controller (TSC/JVM default to **recommend**; **PDB installs live**), and the script installs via Helm and waits for rollout.
 
 ### Non-interactive (CI / automation)
 
@@ -80,14 +80,14 @@ INSTALL_TSC=true INSTALL_JVM=true INSTALL_PDB=true ./install.sh
 # Selective install
 INSTALL_TSC=true INSTALL_PDB=true ./install.sh
 
-# Override image tag (defaults to each chart's appVersion) and dry-run flags
-INSTALL_TSC=true INSTALL_JVM=true TSC_IMAGE_TAG=v1.2.3 JVM_DRY_RUN=false ./install.sh
+# Override image tag (defaults to each chart's appVersion) and mode
+INSTALL_TSC=true INSTALL_JVM=true TSC_IMAGE_TAG=v1.2.3 TSC_MODE=apply JVM_MODE=apply ./install.sh
 ```
 
 | Env var | Purpose | Default |
 |---|---|---|
 | `INSTALL_TSC` / `INSTALL_JVM` / `INSTALL_PDB` | Select controllers (non-interactive) | unset |
-| `TSC_DRY_RUN` / `JVM_DRY_RUN` | Dry-run on/off for those controllers | `true` |
+| `TSC_MODE` / `JVM_MODE` | Controller mode: `apply` (mutate) or `recommend` (snapshot-only) | `recommend` |
 | `TSC_IMAGE_TAG` / `JVM_IMAGE_TAG` / `PDB_IMAGE_TAG` | Override image tag | chart `appVersion` |
 | `NAMESPACE` | Target namespace | `castai-agent` |
 | `IMAGE_PULL_POLICY` | Container image pull policy | `IfNotPresent` |
@@ -98,7 +98,7 @@ INSTALL_TSC=true INSTALL_JVM=true TSC_IMAGE_TAG=v1.2.3 JVM_DRY_RUN=false ./insta
 
 1. Pre-flights `kubectl`, `helm 3.14+`, `jq`.
 2. Detects current kubectl context + cluster name.
-3. (Interactive) Asks which controllers to install and whether each runs in dry-run.
+3. (Interactive) Asks which controllers to install and whether each TSC/JVM controller runs in `apply` or `recommend` mode.
 4. Cleans orphaned cluster-scoped RBAC from prior installs (if the namespace was absent).
 5. Creates the `castai-agent` namespace.
 6. Runs `helm upgrade --install` for each selected controller from its local chart, setting `image.tag`, `image.pullPolicy`, `replicaCount=2`, and the per-controller config flags.
@@ -118,21 +118,54 @@ kubectl logs -n castai-agent -l app.kubernetes.io/name=castai-jvm-probe-controll
 kubectl logs -n castai-agent -l app.kubernetes.io/name=castai-pdb-controller      --tail=50 -f
 ```
 
-### Go live (turn off dry-run) — TSC & JVM
+### Controller modes — TSC & JVM
 
-TSC and JVM install in **dry-run** (observe-only) mode. To make them actually mutate workloads, **patch** their ConfigMaps — both controllers hot-reload the ConfigMap, so **no restart is needed**:
+TSC and JVM install in **recommend** mode by default. In this mode the controllers capture snapshots of your workloads but do **not** mutate them. To make them actually patch workloads, switch to **apply** mode by patching their ConfigMaps — both controllers hot-reload the ConfigMap, so **no restart is needed**:
 
 ```bash
-# TSC: configmap key is "dryRun"
+# Enable apply mode (mutate workloads)
 kubectl -n castai-agent patch cm castai-tsc-controller-config \
-  --type merge -p '{"data":{"dryRun":"false"}}'
+  --type merge -p '{"data":{"managementEnabled":"true","rollbackOnDisable":"false","mode":"apply"}}'
 
-# JVM: configmap key is "jvm-dryRun" (note the prefix — not "dryRun")
 kubectl -n castai-agent patch cm castai-jvm-probe-controller-config \
-  --type merge -p '{"data":{"jvm-dryRun":"false"}}'
+  --type merge -p '{"data":{"managementEnabled":"true","rollbackOnDisable":"false","mode":"apply"}}'
 ```
 
-> Re-enable dry-run later by patching the same key back to `"true"`.
+To disable patching and automatically roll back changes made by the controller:
+
+```bash
+kubectl -n castai-agent patch cm castai-tsc-controller-config \
+  --type merge -p '{"data":{"managementEnabled":"false","rollbackOnDisable":"true"}}'
+
+kubectl -n castai-agent patch cm castai-jvm-probe-controller-config \
+  --type merge -p '{"data":{"managementEnabled":"false","rollbackOnDisable":"true"}}'
+```
+
+To return to recommend mode (snapshot only):
+
+```bash
+kubectl -n castai-agent patch cm castai-tsc-controller-config \
+  --type merge -p '{"data":{"managementEnabled":"true","mode":"recommend"}}'
+
+kubectl -n castai-agent patch cm castai-jvm-probe-controller-config \
+  --type merge -p '{"data":{"managementEnabled":"true","mode":"recommend"}}'
+```
+
+**Verify snapshots**
+
+```bash
+kubectl get tscoriginals -n castai-agent
+kubectl get jvmprobeoriginals -n castai-agent
+```
+
+**Check rollback status**
+
+```bash
+kubectl get tscoriginals -n castai-agent \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="RolledBack")].status}{"\n"}{end}'
+```
+
+See [`docs/rollback-operator-runbook.md`](docs/rollback-operator-runbook.md) for the full runbook.
 
 **PDB is already live** (`FixPoorPDBs=true` at install). To re-apply via Helm:
 
@@ -174,7 +207,9 @@ metadata:
 
 | Key | Description | Default |
 |---|---|---|
-| `config.dryRun` | Observe-only (log intended changes, no mutations) | `true` |
+| `management.enabled` | Enable management (snapshot/rollback) | `true` |
+| `management.mode` | `apply` (mutate workloads) or `recommend` (snapshot only) | `recommend` |
+| `management.rollbackOnDisable` | Roll back controller changes when management is disabled | `false` |
 | `config.defaultConstraints` | Default TSC: `maxSkew`, `topologyKey`, `whenUnsatisfiable` | zone / maxSkew 1 / DoNotSchedule |
 | `config.skipSingleReplica` | Skip workloads with <2 replicas | `true` |
 | `config.logInterval` | Rate-limit interval for repeated logs | `15m` |
@@ -182,7 +217,7 @@ metadata:
 | `config.garbageCollectInterval` | GC interval | `5m` |
 | `config.exclusions` | Regex rules (namespace/name) to skip | `[]` |
 
-Rendered ConfigMap: `castai-tsc-controller-config`, key `dryRun`.
+Rendered ConfigMap: `castai-tsc-controller-config`, keys `managementEnabled`, `mode`, `rollbackOnDisable`.
 
 **Annotations**
 
@@ -222,7 +257,7 @@ Verify: `kubectl get deploy my-app -o jsonpath='{.spec.template.spec.topologySpr
 - **Probe failure monitoring** via pod events (`Unhealthy`/`ProbeFailed` + restart counts)
 - **Auto-fix** adjusts timing fields based on failure patterns (framework-aware)
 - Force-overwrite existing probes (per-probe or all)
-- Dry-run / observe-only mode
+- **Recommend** and **apply** modes with rollback support
 - Liveness probe **opt-in** by default (Spring Boot needs `management.endpoint.health.probes.enabled=true`)
 
 **Detected frameworks → probe paths**
@@ -240,7 +275,9 @@ Verify: `kubectl get deploy my-app -o jsonpath='{.spec.template.spec.topologySpr
 
 | Key | Description | Default |
 |---|---|---|
-| `config.dryRun` | Observe-only | `true` |
+| `management.enabled` | Enable management (snapshot/rollback) | `true` |
+| `management.mode` | `apply` (mutate workloads) or `recommend` (snapshot only) | `recommend` |
+| `management.rollbackOnDisable` | Roll back controller changes when management is disabled | `false` |
 | `config.logIntendedChanges` | Log intended changes | `true` |
 | `config.injectLivenessProbe` | Inject liveness probe | `false` (opt-in) |
 | `config.injectReadinessProbe` | Inject readiness probe | `true` |
@@ -250,7 +287,7 @@ Verify: `kubectl get deploy my-app -o jsonpath='{.spec.template.spec.topologySpr
 | `config.frameworks` | Per-framework paths/timing (JSON) | spring-boot/quarkus/micronaut/generic |
 | `config.exclusions` | Regex rules to skip | `[]` |
 
-Rendered ConfigMap: `castai-jvm-probe-controller-config`. **Dry-run key is `jvm-dryRun`** (prefixed), not `dryRun`.
+Rendered ConfigMap: `castai-jvm-probe-controller-config`, keys `managementEnabled`, `mode`, `rollbackOnDisable`.
 
 **Annotations**
 
@@ -390,8 +427,8 @@ All three use: **leader election** (one active replica), **shared informers** (e
 |---|---|---|---|
 | Target resource | PodDisruptionBudget | topologySpreadConstraints | Container probes |
 | Watches | Deployments, StatefulSets | Deployments, StatefulSets | Deployments, StatefulSets, Pods, Events |
-| Default mode | **Live** (`FixPoorPDBs=true`) | Dry-run (`dryRun=true`) | Dry-run (`jvm-dryRun=true`) |
-| Go-live action | none (already live) | patch `dryRun`→`false` | patch `jvm-dryRun`→`false` |
+| Default mode | **Live** (`FixPoorPDBs=true`) | Recommend (`mode=recommend`) | Recommend (`mode=recommend`) |
+| Go-live action | none (already live) | patch `mode`→`apply` | patch `mode`→`apply` |
 | Auto-fix | Poor PDB configs | N/A | Failing/slow-starting probes |
 | Exclusion rules | regex (ns/name/labels) | regex (ns/name) | regex (ns/name) |
 | Garbage collection | orphaned PDBs | TSC when replicas<2 | N/A |
@@ -405,7 +442,7 @@ These controllers patch Deployment/StatefulSet specs directly via JSON Patch. Gi
 
 1. Add the relevant bypass annotation for GitOps-managed workloads (`workloads.cast.ai/jvm-probe-bypass`, `tsc-bypass`, or `bypass-default-pdb`).
 2. Use annotation overrides to declare desired config declaratively in Git.
-3. Run TSC/JVM in dry-run mode and apply changes via GitOps PRs.
+3. Run TSC/JVM in `recommend` mode and apply changes via GitOps PRs.
 
 ---
 
@@ -414,12 +451,12 @@ These controllers patch Deployment/StatefulSet specs directly via JSON Patch. Gi
 `install.sh` is recommended, but you can install a single controller directly from its local chart:
 
 ```bash
-# TSC (dry-run by default)
+# TSC (recommend mode by default — snapshot only)
 helm install castai-tsc-controller \
   ./controllers/tsc-controller/helm/castai-tsc-controller \
   -n castai-agent --create-namespace
 
-# JVM (dry-run by default)
+# JVM (recommend mode by default — snapshot only)
 helm install castai-jvm-probe-controller \
   ./controllers/jvm-probe-controller/helm/castai-jvm-probe-controller \
   -n castai-agent --create-namespace
