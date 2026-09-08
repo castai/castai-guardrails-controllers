@@ -1,5 +1,11 @@
 # CAST AI Workload Controllers
 
+> **Disclaimer**
+>
+> This repository is **open-source software** and is **not part of the CAST AI product** or a CAST AI commercial offering. It was built by engineers to close real-world reliability gaps — the kind that usually show up when workloads are created quickly, without Kubernetes best practices fully in place.
+>
+> Because these controllers mutate live workloads, your deployment strategy matters: if a workload uses `Recreate` instead of `RollingUpdate`, enabling remediation may cause the workload to recycle. Review your rollout settings and start in dry-run mode.
+
 Three Kubernetes controllers that **automatically remediate workload configuration** in any cluster. They watch your Deployments and StatefulSets and fix common reliability gaps — missing Pod Disruption Budgets, missing Topology Spread Constraints, and missing/misconfigured JVM health probes — so workloads are spread safely, drain cleanly, and start healthily.
 
 | Controller | What it fixes | Default mode |
