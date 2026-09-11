@@ -201,7 +201,7 @@ func unhealthyPodEvictionPoliciesEqual(a, b *policyv1.UnhealthyPodEvictionPolicy
 }
 
 // updateExistingPDB updates an existing castai PDB with new configuration
-func updateExistingPDB(ctx context.Context, clientset *kubernetes.Clientset, existingPDB *policyv1.PodDisruptionBudget, workloadAnnotations map[string]string, replicas *int32, namespace, name string, obj interface{}) {
+func updateExistingPDB(ctx context.Context, clientset kubernetes.Interface, existingPDB *policyv1.PodDisruptionBudget, workloadAnnotations map[string]string, replicas *int32, namespace, name string, obj interface{}) {
 	// Parse PDB configuration from annotations or defaults
 	var minAvailable, maxUnavailable *intstr.IntOrString
 	var needsUpdate bool
@@ -892,7 +892,7 @@ func parsePDBValue(input string) *intstr.IntOrString {
 // controls the poor PDB logging behavior, moves to createPDB function if configMap set to True
 func logAndFixPoorPDBConfig(
 	ctx context.Context,
-	clientset *kubernetes.Clientset,
+	clientset kubernetes.Interface,
 	pdb *policyv1.PodDisruptionBudget,
 	workloadName string,
 	replicas int32,
@@ -967,13 +967,14 @@ func logAndFixPoorPDBConfig(
 }
 
 // core create PDB workflow
-func createPDBForWorkload(ctx context.Context, clientset *kubernetes.Clientset, obj interface{}) {
+func createPDBForWorkload(ctx context.Context, clientset kubernetes.Interface, obj interface{}) {
 	logDebugf("createPDBForWorkload called for object type %T", obj)
 	var (
 		selector            *metav1.LabelSelector
 		namespace, name     string
 		workloadAnnotations map[string]string
 		replicas            *int32
+		podTemplateLabels   map[string]string
 	)
 
 	switch workload := obj.(type) {
@@ -991,6 +992,7 @@ func createPDBForWorkload(ctx context.Context, clientset *kubernetes.Clientset, 
 		workloadAnnotations = workload.Annotations
 		namespace = workload.Namespace
 		name = workload.Name
+		podTemplateLabels = workload.Spec.Template.Labels
 
 		// Check if workload should be excluded
 		logDebugf("About to check exclusions for %s/%s", namespace, name)
@@ -1013,6 +1015,7 @@ func createPDBForWorkload(ctx context.Context, clientset *kubernetes.Clientset, 
 		workloadAnnotations = workload.Annotations
 		namespace = workload.Namespace
 		name = workload.Name
+		podTemplateLabels = workload.Spec.Template.Labels
 
 		// Check if workload should be excluded
 		logDebugf("About to check exclusions for %s/%s", namespace, name)
@@ -1029,8 +1032,7 @@ func createPDBForWorkload(ctx context.Context, clientset *kubernetes.Clientset, 
 		return
 	}
 
-	workloadSel, err := metav1.LabelSelectorAsSelector(selector)
-	if err != nil {
+	if _, err := metav1.LabelSelectorAsSelector(selector); err != nil {
 		logWarnf("Invalid selector for %s/%s: %v\n", namespace, name, err)
 		return
 	}
@@ -1045,31 +1047,42 @@ func createPDBForWorkload(ctx context.Context, clientset *kubernetes.Clientset, 
 	logInterval := defaultPDBConfig.LogInterval
 	defaultPDBConfigLock.RUnlock()
 
-	// Check for existing PDBs and handle accordingly
+	// Check for existing PDBs and handle accordingly (coverage-based matching).
 	var existingCastaiPDB *policyv1.PodDisruptionBudget
 	var existingNonCastaiPDB *policyv1.PodDisruptionBudget
+	coveringPDBs := make([]*policyv1.PodDisruptionBudget, 0)
+	coveringNonControllerNames := make([]string, 0)
 
-	for _, pdb := range pdbList.Items {
-		if pdb.Spec.Selector != nil {
-			pdbSel, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
-			if err == nil && workloadSel.String() == pdbSel.String() {
-				if strings.HasPrefix(pdb.Name, "castai-") {
-					existingCastaiPDB = &pdb
-				} else {
-					existingNonCastaiPDB = &pdb
-				}
+	for i := range pdbList.Items {
+		pdb := &pdbList.Items[i]
+		covers, _ := pdbCoversPodTemplate(pdb, podTemplateLabels)
+		if !covers {
+			continue
+		}
+		coveringPDBs = append(coveringPDBs, pdb)
+		if isControllerOwnedPDB(pdb.Name) {
+			if existingCastaiPDB == nil {
+				existingCastaiPDB = pdb
 			}
+		} else {
+			if existingNonCastaiPDB == nil {
+				existingNonCastaiPDB = pdb
+			}
+			coveringNonControllerNames = append(coveringNonControllerNames, pdb.Name)
 		}
 	}
 
-	// If a non-castai PDB exists, skip creation to avoid conflicts
+	// If a non-castai PDB exists, skip creation to avoid conflicts.
 	if existingNonCastaiPDB != nil {
+		// Clean up any covering controller-owned castai-*-pdb left over when a CAST Helm-style PDB already covers the workload.
+		deleteLeftoverControllerPDBsForCastaiHelm(ctx, clientset, namespace, "workload", name, coveringPDBs)
 		key := fmt.Sprintf("%s/%s", namespace, name)
 		now := time.Now()
 		skipLogTimesLock.Lock()
 		last, ok := skipLogTimes[key]
 		if !ok || now.Sub(last) > logInterval {
-			logInfof("Skipping PDB creation for %s/%s: existing non-castai PDB %s found", namespace, name, existingNonCastaiPDB.Name)
+			logInfof("Skipping PDB creation for %s/%s: existing non-castai PDB(s) %s found",
+				namespace, name, strings.Join(coveringNonControllerNames, ", "))
 			skipLogTimes[key] = now
 		}
 		skipLogTimesLock.Unlock()
@@ -1100,13 +1113,11 @@ func createPDBForWorkload(ctx context.Context, clientset *kubernetes.Clientset, 
 				namespace, attempt+1, pdbRaceRecheckAttempts, err)
 			continue
 		}
-		for _, pdb := range pdbListAfter.Items {
-			if pdb.Spec.Selector != nil {
-				pdbSel, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
-				if err == nil && workloadSel.String() == pdbSel.String() {
-					logInfof("Skipping PDB creation for %s/%s: PDB %s was created after initial check", namespace, name, pdb.Name)
-					return
-				}
+		for i := range pdbListAfter.Items {
+			pdb := &pdbListAfter.Items[i]
+			if covers, _ := pdbCoversPodTemplate(pdb, podTemplateLabels); covers {
+				logInfof("Skipping PDB creation for %s/%s: PDB %s was created after initial check", namespace, name, pdb.Name)
+				return
 			}
 		}
 	}
@@ -1214,6 +1225,65 @@ func createPDBForWorkload(ctx context.Context, clientset *kubernetes.Clientset, 
 		if replicas != nil {
 			logAndFixPoorPDBConfig(ctx, clientset, pdb, name, *replicas, namespace, obj)
 		}
+	}
+}
+
+// isControllerOwnedPDB reports whether the PDB was created by this controller.
+// Controller PDBs are always named castai-<workload>-pdb.
+func isControllerOwnedPDB(name string) bool {
+	return strings.HasPrefix(name, "castai-") && strings.HasSuffix(name, "-pdb")
+}
+
+// isCastaiHelmStylePDB reports whether the PDB looks like a CAST AI Helm-managed
+// PDB (release name starts with castai- but is not the controller's -pdb suffix).
+// Examples: castai-agent, castai-cluster-controller, castai-pod-mutator.
+func isCastaiHelmStylePDB(name string) bool {
+	return strings.HasPrefix(name, "castai-") && !strings.HasSuffix(name, "-pdb")
+}
+
+// pdbCoversPodTemplate reports whether pdb's selector matches the workload's
+// pod template labels (coverage match used by create and multi-PDB cleanup).
+// When the PDB covers the template, the parsed selector is also returned so
+// callers can reuse it (e.g. exact-match checks) without converting twice.
+func pdbCoversPodTemplate(pdb *policyv1.PodDisruptionBudget, podTemplateLabels map[string]string) (bool, labels.Selector) {
+	if pdb == nil || pdb.Spec.Selector == nil {
+		return false, nil
+	}
+	pdbSel, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
+	if err != nil {
+		logWarnf("PDB %s/%s has an invalid selector and will be ignored: %v", pdb.Namespace, pdb.Name, err)
+		return false, nil
+	}
+	if !pdbSel.Matches(labels.Set(podTemplateLabels)) {
+		return false, nil
+	}
+	return true, pdbSel
+}
+
+// deleteLeftoverControllerPDBsForCastaiHelm removes covering controller-owned
+// castai-*-pdb objects when a covering CAST Helm-style PDB is also present.
+// Customer controller PDBs are left alone when only a non-castai Helm PDB covers them.
+func deleteLeftoverControllerPDBsForCastaiHelm(ctx context.Context, clientset kubernetes.Interface, namespace, workloadKind, workloadName string, covering []*policyv1.PodDisruptionBudget) {
+	hasCastaiHelm := false
+	for _, pdb := range covering {
+		if isCastaiHelmStylePDB(pdb.Name) {
+			hasCastaiHelm = true
+			break
+		}
+	}
+	if !hasCastaiHelm {
+		return
+	}
+	for _, pdb := range covering {
+		if !isControllerOwnedPDB(pdb.Name) {
+			continue
+		}
+		err := clientset.PolicyV1().PodDisruptionBudgets(namespace).Delete(ctx, pdb.Name, metav1.DeleteOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			logErrorf("Failed to delete leftover castai PDB %s/%s for %s %s: %v", namespace, pdb.Name, workloadKind, workloadName, err)
+			continue
+		}
+		logInfof("Deleted leftover castai PDB %s/%s: CAST Helm-style PDB already covers %s %s/%s", namespace, pdb.Name, workloadKind, namespace, workloadName)
 	}
 }
 
@@ -1514,7 +1584,7 @@ func isPoorPDBConfig(pdb *policyv1.PodDisruptionBudget, replicas int32) bool {
 }
 
 // Scans for workloads targeted by multiple PDBs and removes redundant castai PDBs if necessary.
-func scanAllPDBsForMultiplePDBs(ctx context.Context, clientset *kubernetes.Clientset) {
+func scanAllPDBsForMultiplePDBs(ctx context.Context, clientset kubernetes.Interface) {
 	namespaces, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		logErrorf("Failed to list namespaces: %v", err)
@@ -1536,57 +1606,9 @@ func scanAllPDBsForMultiplePDBs(ctx context.Context, clientset *kubernetes.Clien
 		if err != nil {
 			logErrorf("Failed to list Deployments in namespace %s: %v", namespace, err)
 		} else {
-			for _, deploy := range deployments.Items {
-				if deploy.Annotations != nil && deploy.Annotations[annotationBypass] == "true" {
-					continue
-				}
-				if deploy.Spec.Selector == nil {
-					continue
-				}
-				workloadSelector, err := metav1.LabelSelectorAsSelector(deploy.Spec.Selector)
-				if err != nil {
-					logWarnf("Invalid selector for Deployment %s/%s: %v", deploy.Namespace, deploy.Name, err)
-					continue
-				}
-				matchingPDBs := []*policyv1.PodDisruptionBudget{}
-				for i, pdb := range pdbList.Items {
-					if pdb.Spec.Selector == nil {
-						continue
-					}
-					pdbSelector, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
-					if err != nil {
-						continue
-					}
-					if pdbSelector.String() == workloadSelector.String() {
-						matchingPDBs = append(matchingPDBs, &pdbList.Items[i])
-					}
-				}
-				if len(matchingPDBs) > 1 {
-					// Count non-castai PDBs
-					nonCastaiCount := 0
-					for _, pdb := range matchingPDBs {
-						if !(strings.HasPrefix(pdb.Name, "castai-") && strings.HasSuffix(pdb.Name, "-pdb")) {
-							nonCastaiCount++
-						}
-					}
-					// Only delete castai-*-pdb if at least one non-castai PDB exists
-					if nonCastaiCount > 0 {
-						for _, pdb := range matchingPDBs {
-							if strings.HasPrefix(pdb.Name, "castai-") && strings.HasSuffix(pdb.Name, "-pdb") {
-								err := clientset.PolicyV1().PodDisruptionBudgets(namespace).Delete(ctx, pdb.Name, metav1.DeleteOptions{})
-								if err != nil && !apierrors.IsNotFound(err) {
-									logErrorf("Failed to delete castai PDB %s/%s: %v", namespace, pdb.Name, err)
-								} else {
-									logInfof("Deleted castai PDB %s/%s due to multiple PDBs targeting deployment %s", namespace, pdb.Name, deploy.Name)
-								}
-							}
-						}
-					}
-					// Warn if more than one non-castai PDB remains
-					if nonCastaiCount > 1 {
-						logWarnf("WARNING: Multiple non-castai PDBs target deployment %s/%s", namespace, deploy.Name)
-					}
-				}
+			for i := range deployments.Items {
+				d := &deployments.Items[i]
+				cleanupMultiplePDBsForWorkload(ctx, clientset, namespace, "deployment", d.Name, d.Annotations, d.Spec.Template.Labels, pdbList.Items)
 			}
 		}
 
@@ -1595,58 +1617,42 @@ func scanAllPDBsForMultiplePDBs(ctx context.Context, clientset *kubernetes.Clien
 		if err != nil {
 			logErrorf("Failed to list StatefulSets in namespace %s: %v", namespace, err)
 		} else {
-			for _, sts := range statefulsets.Items {
-				if sts.Annotations != nil && sts.Annotations[annotationBypass] == "true" {
-					continue
-				}
-				if sts.Spec.Selector == nil {
-					continue
-				}
-				workloadSelector, err := metav1.LabelSelectorAsSelector(sts.Spec.Selector)
-				if err != nil {
-					logWarnf("Invalid selector for StatefulSet %s/%s: %v", sts.Namespace, sts.Name, err)
-					continue
-				}
-				matchingPDBs := []*policyv1.PodDisruptionBudget{}
-				for i, pdb := range pdbList.Items {
-					if pdb.Spec.Selector == nil {
-						continue
-					}
-					pdbSelector, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
-					if err != nil {
-						continue
-					}
-					if pdbSelector.String() == workloadSelector.String() {
-						matchingPDBs = append(matchingPDBs, &pdbList.Items[i])
-					}
-				}
-				if len(matchingPDBs) > 1 {
-					// Count non-castai PDBs
-					nonCastaiCount := 0
-					for _, pdb := range matchingPDBs {
-						if !(strings.HasPrefix(pdb.Name, "castai-") && strings.HasSuffix(pdb.Name, "-pdb")) {
-							nonCastaiCount++
-						}
-					}
-					// Only delete castai-*-pdb if at least one non-castai PDB exists
-					if nonCastaiCount > 0 {
-						for _, pdb := range matchingPDBs {
-							if strings.HasPrefix(pdb.Name, "castai-") && strings.HasSuffix(pdb.Name, "-pdb") {
-								err := clientset.PolicyV1().PodDisruptionBudgets(namespace).Delete(ctx, pdb.Name, metav1.DeleteOptions{})
-								if err != nil && !apierrors.IsNotFound(err) {
-									logErrorf("Failed to delete castai PDB %s/%s: %v", namespace, pdb.Name, err)
-								} else {
-									logInfof("Deleted castai PDB %s/%s due to multiple PDBs targeting statefulset %s", namespace, pdb.Name, sts.Name)
-								}
-							}
-						}
-					}
-					// Warn if more than one non-castai PDB remains
-					if nonCastaiCount > 1 {
-						logWarnf("WARNING: Multiple non-castai PDBs target statefulset %s/%s", namespace, sts.Name)
-					}
-				}
+			for i := range statefulsets.Items {
+				s := &statefulsets.Items[i]
+				cleanupMultiplePDBsForWorkload(ctx, clientset, namespace, "statefulset", s.Name, s.Annotations, s.Spec.Template.Labels, pdbList.Items)
 			}
 		}
+	}
+}
+
+// cleanupMultiplePDBsForWorkload deletes covering controller-owned castai-*-pdb leftovers
+// when a CAST Helm-style PDB also covers the workload, and warns when multiple
+// non-controller PDBs target the same workload. Customer controller PDBs covered
+// only by an unrelated Helm PDB are left alone.
+func cleanupMultiplePDBsForWorkload(ctx context.Context, clientset kubernetes.Interface, namespace, workloadKind, workloadName string, annotations map[string]string, podTemplateLabels map[string]string, pdbs []policyv1.PodDisruptionBudget) {
+	if annotations != nil && annotations[annotationBypass] == "true" {
+		return
+	}
+
+	covering := make([]*policyv1.PodDisruptionBudget, 0)
+	nonControllerCount := 0
+	for i := range pdbs {
+		pdb := &pdbs[i]
+		if covers, _ := pdbCoversPodTemplate(pdb, podTemplateLabels); !covers {
+			continue
+		}
+		covering = append(covering, pdb)
+		if !isControllerOwnedPDB(pdb.Name) {
+			nonControllerCount++
+		}
+	}
+	if len(covering) <= 1 {
+		return
+	}
+
+	deleteLeftoverControllerPDBsForCastaiHelm(ctx, clientset, namespace, workloadKind, workloadName, covering)
+
+	if nonControllerCount > 1 {
+		logWarnf("WARNING: Multiple non-castai PDBs target %s %s/%s", workloadKind, namespace, workloadName)
 	}
 }

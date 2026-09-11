@@ -30,10 +30,13 @@ This controller enables safe, automated disruption management with per-workload 
 - **Exclusion Rules:**  
   Configure regex-based exclusion rules to automatically skip PDB creation for specific workloads based on namespace, name, and label patterns. Useful for system workloads, temporary deployments, or critical services.
 
-- **Garbage Collection:**  
+- **Garbage Collection:**
   Orphaned PDBs are cleaned up when workloads are deleted or change state.
 
-- **Leader Election:**  
+- **CAST Component Leftover Cleanup:**
+  On reconcile and during the periodic multi-PDB scan, if a CAST Helm-style PDB (`castai-*` without the `-pdb` suffix) already covers a workload and a leftover controller-owned `castai-*-pdb` also covers it, the controller deletes only the leftover controller PDB. Customer `castai-*-pdb` objects covered solely by unrelated Helm PDBs are left alone so controller-managed customer workloads stay intact.
+
+- **Leader Election:**
   Supports safe, highly available operation in multi-replica controller deployments.
 
 - **Configurable log levels:**  
