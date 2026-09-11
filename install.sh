@@ -301,14 +301,14 @@ if [ ! -t 0 ] || [ -n "${INSTALL_TSC}${INSTALL_JVM}${INSTALL_PDB}" ]; then
 fi
 
 # -------------------------
-# Controller selection menu (checkbox-style, Space to toggle, Enter to confirm)
+# Controller selection menu (checkbox-style, Backspace/Space to toggle, Enter to confirm)
 # -------------------------
 #
 # checkbox_menu <title> <name1> <name2> ...
 #
-# Renders a live-redrawn multi-select. Navigation: ↑/↓ or j/k. Toggle: Space.
-# Confirm: Enter. Cancel: Ctrl-C. Returns selected indices (space-separated,
-# 0-based) on stdout, or exits 130 on Ctrl-C.
+# Renders a live-redrawn multi-select. Navigation: ↑/↓ or j/k. Toggle:
+# Backspace or Space. Confirm: Enter. Cancel: Ctrl-C. Returns selected indices
+# (space-separated, 0-based) on stdout, or exits 130 on Ctrl-C.
 #
 # Pure bash + stty raw + ANSI escapes — no external deps beyond a VT100-ish
 # terminal (works on macOS Terminal.app, iTerm2, gnome-terminal, Linux tty).
@@ -325,26 +325,22 @@ checkbox_menu() {
   # Save current stty state; restore on any exit path
   local saved_stty
   saved_stty="$(stty -g </dev/tty)"
+  local cleanup_cmd="stty '$saved_stty' </dev/tty 2>/dev/null || true; printf '\033[?1049l' >/dev/tty 2>/dev/null || true; printf '\033[?25h' >/dev/tty 2>/dev/null || true"
   # shellcheck disable=SC2064
-  trap "stty '$saved_stty' </dev/tty; printf '\033[?25h' >/dev/tty" RETURN INT TERM
+  trap "$cleanup_cmd" RETURN INT TERM
 
   stty -echo -icanon min 1 time 0 </dev/tty
-  printf '\033[?25l' >/dev/tty   # hide cursor
 
-  # Save the top-of-menu anchor before any rendering happens. Every redraw()
-  # restores the cursor to this point and issues "\033[J" (erase below) so
-  # wrapped or stale lines from the previous render cannot leak through on
-  # narrow terminals — this is what previously caused the duplicated
-  # selection rendering. We deliberately drop the old cursor-up/down
-  # arithmetic: save+restore + erase-below handles positioning cleanly even
-  # when an item wraps to more than one visual line.
-  printf '\n' >/dev/tty
-  printf '\033[s' >/dev/tty
+  # Switch to the alternate screen buffer, hide the cursor, and park the
+  # cursor at the top-left. Every redraw() homes the cursor and erases below,
+  # so stale menu renders can never leak through — regardless of whether the
+  # terminal supports the SCO save/restore-cursor sequences that caused the
+  # duplicated menus on some terminals.
+  printf '\033[?1049h\033[H\033[?25l' >/dev/tty
 
   redraw() {
-    # Restore cursor to the top-of-menu anchor and wipe everything below it.
-    printf '\033[u' >/dev/tty
-    printf '\033[J' >/dev/tty
+    # Home the cursor and wipe the alternate screen below the cursor.
+    printf '\033[H\033[J' >/dev/tty
 
     # Re-render the full menu: blank, title, separator, items, blank, hint footer.
     printf '\n' >/dev/tty
@@ -361,7 +357,7 @@ checkbox_menu() {
       fi
     done
     printf '\n' >/dev/tty
-    printf '  \033[2m↑/↓ or j/k navigate  ·  Space toggles  ·  Enter confirms  ·  Ctrl-C cancels\033[0m\n' >/dev/tty
+    printf '  \033[2m↑/↓ or j/k navigate  ·  Backspace/Space toggles  ·  Enter confirms  ·  Ctrl-C cancels\033[0m\n' >/dev/tty
   }
 
   redraw
@@ -394,7 +390,8 @@ checkbox_menu() {
         ;;
       j) [ "$cursor" -lt $((n - 1)) ] && cursor=$((cursor + 1)); redraw ;;
       k) [ "$cursor" -gt 0 ] && cursor=$((cursor - 1)); redraw ;;
-      ' ')
+      ' '|$'\x7f'|$'\b')
+        # Space, Backspace (DEL), or Ctrl-H all toggle the current item.
         checked[cursor]=$((1 - checked[cursor]))
         redraw
         ;;
@@ -405,8 +402,7 @@ checkbox_menu() {
   done
 
   # Restore terminal state (also restored on RETURN via trap)
-  stty "$saved_stty" </dev/tty
-  printf '\033[?25h' >/dev/tty
+  eval "$cleanup_cmd"
   trap - RETURN INT TERM
   printf '\n' >/dev/tty
 
