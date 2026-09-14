@@ -77,18 +77,18 @@ func TestParseJVMConfig_OverrideRollbackOnDisable(t *testing.T) {
 	}
 }
 
-func TestParseJVMConfig_OverrideModeRecommend(t *testing.T) {
+func TestParseJVMConfig_OverrideModeApply(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
-			"mode": ModeRecommend,
+			"mode": ModeApply,
 		},
 	}
 	cfg, errs := ParseJVMConfig(cm, "")
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	if cfg.Mode != ModeRecommend {
-		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeRecommend)
+	if cfg.Mode != ModeApply {
+		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeApply)
 	}
 }
 
@@ -197,7 +197,7 @@ func TestParseJVMConfig_DeprecatedEnableProbeManagementFalse(t *testing.T) {
 	}
 }
 
-func TestParseJVMConfig_DeprecatedDryRunTrueMapsToRecommend(t *testing.T) {
+func TestParseJVMConfig_DeprecatedDryRunIsIgnored(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
 			"jvm-dryRun": "true",
@@ -207,15 +207,18 @@ func TestParseJVMConfig_DeprecatedDryRunTrueMapsToRecommend(t *testing.T) {
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	if cfg.Mode != ModeRecommend {
-		t.Errorf("Mode = %q, want %q (mapped from deprecated jvm-dryRun=true)", cfg.Mode, ModeRecommend)
+	// jvm-dryRun used to map to Mode=recommend. The webhook migration
+	// removes the recommend mode entirely; the deprecated key is now a
+	// no-op and Mode keeps its default value.
+	if cfg.Mode != ModeApply {
+		t.Errorf("Mode = %q, want %q (jvm-dryRun should be ignored)", cfg.Mode, ModeApply)
 	}
 }
 
 func TestParseJVMConfig_CanonicalModeWinsOverDeprecatedDryRun(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
-			"mode":      ModeApply,
+			"mode":       ModeApply,
 			"jvm-dryRun": "true",
 		},
 	}
@@ -232,13 +235,13 @@ func TestJVMConfig_StateOf(t *testing.T) {
 	cfg := &JVMConfig{
 		ManagementEnabled: true,
 		RollbackOnDisable: true,
-		Mode:              ModeRecommend,
+		Mode:              ModeApply,
 		SnapshotEnabled:   false,
 		OperatorNamespace: "ns1",
 	}
 	st := cfg.StateOf()
 	if st.ManagementEnabled != true || st.RollbackOnDisable != true ||
-		st.Mode != ModeRecommend || st.SnapshotEnabled != false ||
+		st.Mode != ModeApply || st.SnapshotEnabled != false ||
 		st.OperatorNamespace != "ns1" {
 		t.Errorf("StateOf = %+v, want all fields mirrored", st)
 	}

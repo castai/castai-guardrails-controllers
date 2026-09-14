@@ -65,3 +65,16 @@ Generate config checksum (simplified)
 {{- define "castai-jvm-probe-controller.config" -}}
 {{- toJson .Values.config }}
 {{- end }}
+
+{{/*
+Resolve the Secret name that holds the webhook TLS cert + key.
+When tls.manualSecret.enabled is true, the operator-supplied name is used.
+Otherwise (cert-manager or default), the convention is `<fullname>-tls`.
+*/}}
+{{- define "castai-jvm-probe-controller.webhookTLSSecretName" -}}
+{{- if .Values.tls.manualSecret.enabled -}}
+{{- .Values.tls.manualSecret.name -}}
+{{- else -}}
+{{- include "castai-jvm-probe-controller.fullname" . -}}-tls
+{{- end -}}
+{{- end }}

@@ -136,13 +136,32 @@ func DetectJVMContainer(container corev1.Container) ContainerInfo {
 	// PHASE 2: Image patterns with word boundaries (only if not already detected via env)
 	if !info.IsJVM {
 		imageLower := strings.ToLower(container.Image)
+
+		// JVM runtime patterns (openjdk, java, jre, jdk, ...)
 		for _, re := range jvmImagePatterns {
 			if re.MatchString(imageLower) {
 				info.IsJVM = true
 				break
 			}
 		}
-		
+
+		// Framework-specific images (spring-boot, quarkus, micronaut) are
+		// also JVM workloads even when they do not contain a runtime keyword.
+		if !info.IsJVM {
+			frameworkPatterns := make([]*regexp.Regexp, 0,
+				len(springBootImagePatterns)+len(quarkusImagePatterns)+len(micronautImagePatterns))
+			frameworkPatterns = append(frameworkPatterns, springBootImagePatterns...)
+			frameworkPatterns = append(frameworkPatterns, quarkusImagePatterns...)
+			frameworkPatterns = append(frameworkPatterns, micronautImagePatterns...)
+
+			for _, re := range frameworkPatterns {
+				if re.MatchString(imageLower) {
+					info.IsJVM = true
+					break
+				}
+			}
+		}
+
 		// Check false-positive patterns (explicitly exclude unless env vars say JVM)
 		if !envVarsIndicateJVM(container.Env) {
 			for _, re := range nonJVMImagePatterns {
