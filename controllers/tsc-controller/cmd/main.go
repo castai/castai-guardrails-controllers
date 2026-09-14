@@ -54,6 +54,11 @@ const (
 	ManagedByValue          = "tsc-controller"
 	AnnotationTSCManaged    = "workloads.cast.ai/tsc-managed"
 	TSCControllerFinalizer  = "workloads.cast.ai/castai-tsc-controller-finalizer"
+	// ControllerSelfLabel marks the controller's own pod template so the
+	// controller can recognise and exclude its own workload without relying
+	// on the Helm release name.
+	ControllerSelfLabel     = "workloads.cast.ai/tsc-controller"
+	ControllerSelfLabelTrue = "true"
 )
 
 var (
@@ -1133,7 +1138,34 @@ func deleteTSCForWorkload(namespace, name string) {
 	workloadsLock.Unlock()
 }
 
+// isControllerSelf reports whether the given workload is the controller's
+// own pod. The controller marks its Deployment's pod template with
+// ControllerSelfLabel; combined with the operator namespace this identifies
+// the controller regardless of Helm release name or per-instance naming
+// overrides. config.OperatorNamespace is read under configLock to match the
+// concurrency pattern used elsewhere in this file.
+func isControllerSelf(namespace string, labels map[string]string) bool {
+	configLock.RLock()
+	operatorNS := ""
+	if config != nil {
+		operatorNS = config.OperatorNamespace
+	}
+	configLock.RUnlock()
+
+	if namespace != operatorNS {
+		return false
+	}
+	if labels == nil {
+		return false
+	}
+	return labels[ControllerSelfLabel] == ControllerSelfLabelTrue
+}
+
 func isExcluded(namespace, name string, labels map[string]string) bool {
+	if isControllerSelf(namespace, labels) {
+		return true
+	}
+
 	rulesLock.RLock()
 	defer rulesLock.RUnlock()
 
