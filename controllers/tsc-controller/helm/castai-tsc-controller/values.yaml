@@ -47,6 +47,9 @@ config:
     - maxSkew: 1
       topologyKey: topology.kubernetes.io/zone
       whenUnsatisfiable: DoNotSchedule
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
   # Skip workloads with single replica (default: true)
   skipSingleReplica: true
   # Controller scan/reconcile interval (e.g., "2m", "5m")

@@ -40,8 +40,22 @@ func TestParseTSCConfig_Defaults(t *testing.T) {
 	if cfg.Version != "dev" {
 		t.Errorf("Version default = %q, want dev", cfg.Version)
 	}
-	if len(cfg.DefaultConstraints) == 0 {
-		t.Errorf("DefaultConstraints empty, want non-empty")
+	if len(cfg.DefaultConstraints) != 2 {
+		t.Fatalf("DefaultConstraints len = %d, want 2", len(cfg.DefaultConstraints))
+	}
+	zone := cfg.DefaultConstraints[0]
+	if zone.TopologyKey != "topology.kubernetes.io/zone" {
+		t.Errorf("DefaultConstraints[0].TopologyKey = %q, want %q", zone.TopologyKey, "topology.kubernetes.io/zone")
+	}
+	if zone.WhenUnsatisfiable != corev1.DoNotSchedule {
+		t.Errorf("DefaultConstraints[0].WhenUnsatisfiable = %v, want %v", zone.WhenUnsatisfiable, corev1.DoNotSchedule)
+	}
+	hostname := cfg.DefaultConstraints[1]
+	if hostname.TopologyKey != "kubernetes.io/hostname" {
+		t.Errorf("DefaultConstraints[1].TopologyKey = %q, want %q", hostname.TopologyKey, "kubernetes.io/hostname")
+	}
+	if hostname.WhenUnsatisfiable != corev1.ScheduleAnyway {
+		t.Errorf("DefaultConstraints[1].WhenUnsatisfiable = %v, want %v", hostname.WhenUnsatisfiable, corev1.ScheduleAnyway)
 	}
 }
 
