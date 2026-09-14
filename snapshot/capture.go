@@ -9,6 +9,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 )
 
 // NewSnapshotFn is the controller-supplied function that builds a fresh
@@ -104,22 +105,38 @@ func CaptureIfAbsent[T any](
 		return fmt.Errorf("add finalizer: %w", err)
 	}
 
-	conds := acc.GetConditions(created)
-	conds = SetCondition(conds, metav1.Condition{
-		Type:               ConditionReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             ReasonCaptured,
-		Message:            fmt.Sprintf("Original state captured for %s %s/%s", identity.Kind, identity.Namespace, identity.Name),
-		ObservedGeneration: identity.Generation,
+	// The finalizer patch above mutates resourceVersion, so the object held
+	// in `created` is now stale. RetryOnConflict re-fetches on each
+	// iteration so UpdateStatus uses the latest resourceVersion and
+	// tolerates concurrent writers between attempts.
+	snapName := acc.NameOf(created)
+	updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh, err := c.Get(ctx, namespace, snapName)
+		if err != nil {
+			return err
+		}
+		conds := acc.GetConditions(fresh)
+		conds = SetCondition(conds, metav1.Condition{
+			Type:               ConditionReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             ReasonCaptured,
+			Message:            fmt.Sprintf("Original state captured for %s %s/%s", identity.Kind, identity.Namespace, identity.Name),
+			ObservedGeneration: identity.Generation,
+		})
+		acc.SetConditions(&fresh, conds)
+		if acc.SetObservedGeneration != nil {
+			acc.SetObservedGeneration(&fresh, identity.Generation)
+		}
+		_, err = c.UpdateStatus(ctx, namespace, fresh)
+		return err
 	})
-	acc.SetConditions(&created, conds)
-	if acc.SetObservedGeneration != nil {
-		acc.SetObservedGeneration(&created, identity.Generation)
+	if updateErr != nil {
+		// Best-effort cleanup on failure.
+		if delErr := c.Delete(ctx, namespace, snapName); delErr != nil && !apierrors.IsNotFound(delErr) {
+			logger.Warnf("capture-if-absent: best-effort delete of %s/%s after UpdateStatus failure: %v", namespace, snapName, delErr)
+		}
+		return fmt.Errorf("update status: %w", updateErr)
 	}
-
-	if _, err := c.UpdateStatus(ctx, namespace, created); err != nil {
-		return fmt.Errorf("update status: %w", err)
-	}
-	logger.Infof("snapshot created: %s/%s", namespace, acc.NameOf(created))
+	logger.Infof("snapshot created: %s/%s", namespace, snapName)
 	return nil
 }

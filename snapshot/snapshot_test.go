@@ -313,6 +313,138 @@ func TestCaptureIfAbsent_UpdateStatusFailure_Propagates(t *testing.T) {
 	require.Error(t, err)
 }
 
+// rvBumpClient wraps tscClient to simulate the API server behavior that
+// motivates the RetryOnConflict change: each successful Get/Patch bumps
+// the snapshot's resourceVersion, so any UpdateStatus call that uses a
+// previously-fetched object will see a stale RV and conflict.
+type rvBumpClient struct {
+	inner              *tscClient
+	getCount           int
+	updateStatusCount  int
+	updateStatusRVs    []string
+	updateStatusErrSeq []error
+	updateStatusErrIdx int
+}
+
+func newRVBumpClient(store fakeStore) *rvBumpClient {
+	return &rvBumpClient{inner: &tscClient{store: store}}
+}
+
+func (c *rvBumpClient) Get(ctx context.Context, ns, name string) (*workloadsv1.TSCOriginal, error) {
+	c.getCount++
+	out, err := c.inner.Get(ctx, ns, name)
+	if err != nil {
+		return out, err
+	}
+	// Simulate concurrent writers by incrementing resourceVersion on every
+	// fetch. After the finalizer patch (which sets RV via Patch), each
+	// subsequent Get sees a strictly newer RV.
+	out.ResourceVersion = fmt.Sprintf("%d", c.getCount)
+	c.inner.store[keyOf(ns, name)] = out
+	return out, nil
+}
+
+func (c *rvBumpClient) Create(ctx context.Context, ns string, obj *workloadsv1.TSCOriginal) (*workloadsv1.TSCOriginal, error) {
+	return c.inner.Create(ctx, ns, obj)
+}
+
+func (c *rvBumpClient) Update(ctx context.Context, ns string, obj *workloadsv1.TSCOriginal) (*workloadsv1.TSCOriginal, error) {
+	return c.inner.Update(ctx, ns, obj)
+}
+
+func (c *rvBumpClient) UpdateStatus(ctx context.Context, ns string, obj *workloadsv1.TSCOriginal) (*workloadsv1.TSCOriginal, error) {
+	c.updateStatusCount++
+	c.updateStatusRVs = append(c.updateStatusRVs, obj.ResourceVersion)
+	var err error
+	if c.updateStatusErrIdx < len(c.updateStatusErrSeq) {
+		err = c.updateStatusErrSeq[c.updateStatusErrIdx]
+		c.updateStatusErrIdx++
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c.inner.UpdateStatus(ctx, ns, obj)
+}
+
+func (c *rvBumpClient) Delete(ctx context.Context, ns, name string) error {
+	return c.inner.Delete(ctx, ns, name)
+}
+
+func (c *rvBumpClient) List(ctx context.Context, ns string) ([]*workloadsv1.TSCOriginal, error) {
+	return c.inner.List(ctx, ns)
+}
+
+func (c *rvBumpClient) Patch(ctx context.Context, ns, name string, pt types.PatchType, data []byte) (*workloadsv1.TSCOriginal, error) {
+	return c.inner.Patch(ctx, ns, name, pt, data)
+}
+
+// TestCaptureIfAbsent_FinalizerPatchBumpsResourceVersion_UpdateStatusSucceeds
+// covers the core scenario from the plan: the finalizer patch changes the
+// snapshot's resourceVersion, so the UpdateStatus call MUST re-fetch before
+// issuing the status update. Without the re-fetch, UpdateStatus would 409.
+func TestCaptureIfAbsent_FinalizerPatchBumpsResourceVersion_UpdateStatusSucceeds(t *testing.T) {
+	store := fakeStore{}
+	identity := WorkloadIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "castai-agent", Name: "nginx", UID: types.UID("uid-1"), Generation: 5}
+	name := CollisionSafeName(identity.Kind, identity.Namespace, identity.Name, identity.UID)
+	client := newRVBumpClient(store)
+
+	err := CaptureIfAbsent(context.Background(),
+		client, TSCOriginalAccessor, NopLogger{}, "castai-agent",
+		FinalizerName(testControllerName), testControllerName, identity,
+		func(id WorkloadIdentity) (*workloadsv1.TSCOriginal, error) {
+			return newTestSnapshot(id.UID, name, nil), nil
+		})
+	require.NoError(t, err)
+
+	// UpdateStatus should be invoked exactly once on the first try because
+	// the closure re-fetched the post-patch resourceVersion.
+	assert.Equal(t, 1, client.updateStatusCount, "UpdateStatus should succeed on first attempt after re-fetch")
+	require.Len(t, client.updateStatusRVs, 1)
+	assert.NotEmpty(t, client.updateStatusRVs[0], "UpdateStatus must be called with the freshly-fetched (non-empty) resourceVersion")
+
+	// Initial CaptureIfAbsent Get + AddFinalizer Get + closure Get = 3.
+	assert.GreaterOrEqual(t, client.getCount, 3, "Get must be called inside the retry closure at least once")
+}
+
+// TestCaptureIfAbsent_UpdateStatus409ThenRetrySucceeds covers the conflict
+// retry path: the first UpdateStatus returns 409 because someone else
+// updated the snapshot, the closure re-fetches (seeing a newer RV), and the
+// second UpdateStatus succeeds.
+func TestCaptureIfAbsent_UpdateStatus409ThenRetrySucceeds(t *testing.T) {
+	store := fakeStore{}
+	identity := WorkloadIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "castai-agent", Name: "nginx", UID: types.UID("uid-1"), Generation: 5}
+	name := CollisionSafeName(identity.Kind, identity.Namespace, identity.Name, identity.UID)
+	client := newRVBumpClient(store)
+
+	conflict := apierrors.NewConflict(
+		schema.GroupResource{Group: "workloads.cast.ai", Resource: "tscoriginals"},
+		name,
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+	client.updateStatusErrSeq = []error{conflict}
+
+	err := CaptureIfAbsent(context.Background(),
+		client, TSCOriginalAccessor, NopLogger{}, "castai-agent",
+		FinalizerName(testControllerName), testControllerName, identity,
+		func(id WorkloadIdentity) (*workloadsv1.TSCOriginal, error) {
+			return newTestSnapshot(id.UID, name, nil), nil
+		})
+	require.NoError(t, err, "RetryOnConflict should recover from a single 409")
+
+	assert.Equal(t, 2, client.updateStatusCount, "UpdateStatus should be called twice: once 409, once success")
+	require.Len(t, client.updateStatusRVs, 2)
+	// Each closure attempt fetches a fresh RV; the second attempt must use
+	// a strictly newer RV than the first.
+	assert.NotEqual(t, client.updateStatusRVs[0], client.updateStatusRVs[1],
+		"the retry attempt must call UpdateStatus with a newer resourceVersion than the first attempt")
+
+	// Initial CaptureIfAbsent Get + AddFinalizer Get + 2 closure Gets = 4.
+	assert.GreaterOrEqual(t, client.getCount, 4, "Get should be called more than once inside the retry closure")
+	// Snapshot should still exist in the store after successful retry (no cleanup).
+	assert.Len(t, store, 1)
+	assert.True(t, IsReady(store[keyOf("castai-agent", name)].Status.Conditions))
+}
+
 // ===== Rollback tests =====
 
 func TestRollback_TargetNotFound_MarksTargetGone(t *testing.T) {
