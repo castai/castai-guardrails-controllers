@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -75,6 +76,20 @@ var (
 	rulesLock        sync.RWMutex
 	processedWorkloads = make(map[string]bool)
 	workloadsLock    sync.Mutex
+
+	// reconcileAllWorkloadsFn is a function-typed indirection over
+	// reconcileAllWorkloads so tests can inject a synchronous spy. The
+	// production code uses the default value; tests reassign it under
+	// their own mutex and restore it on cleanup.
+	reconcileAllWorkloadsFn = reconcileAllWorkloads
+
+	// runRollbackFn is a function-typed indirection over runRollback so
+	// tests can inject a synchronous spy for the rollback path. The
+	// production code uses the default value; tests reassign it under
+	// their own mutex and restore it on cleanup. The namespace argument
+	// is passed explicitly so the rollback goroutine never has to read
+	// the mutable global `config` pointer.
+	runRollbackFn = runRollback
 
 	tscClient   *snapshot.TSCClient
 	tscAccessor *snapshot.Accessor[*workloadsv1.TSCOriginal]
@@ -234,15 +249,23 @@ func loadConfig() {
 
 	// Exclusion rules are not part of TSCConfig; parse them here so they keep
 	// their own lock and stay in sync with the previous behaviour.
+	//
+	// Always reassign exclusionRules under rulesLock when the ConfigMap
+	// exists, including the case where the key is absent or empty: in that
+	// case we set rules to nil so workloads that were previously excluded
+	// stop being skipped on the next reconcile pass. Silently keeping the
+	// stale slice would contradict the plan requirement to reconcile
+	// existing workloads when exclusion rules change.
 	if cm != nil {
-		if exclusionsJSON, ok := cm.Data["exclusions"]; ok {
-			var rules []ExclusionRule
-			if err := json.Unmarshal([]byte(exclusionsJSON), &rules); err == nil {
-				rulesLock.Lock()
-				exclusionRules = rules
-				rulesLock.Unlock()
+		var rules []ExclusionRule
+		if exclusionsJSON, ok := cm.Data["exclusions"]; ok && exclusionsJSON != "" {
+			if err := json.Unmarshal([]byte(exclusionsJSON), &rules); err != nil {
+				logWarn("config-parse", "Failed to parse exclusions: %v", err)
 			}
 		}
+		rulesLock.Lock()
+		exclusionRules = rules
+		rulesLock.Unlock()
 	}
 
 	config = newCfg
@@ -263,10 +286,6 @@ func runController(ctx context.Context) {
 	deploymentInformer := factory.Apps().V1().Deployments().Informer()
 	statefulSetInformer := factory.Apps().V1().StatefulSets().Informer()
 	configMapInformer := factory.Core().V1().ConfigMaps().Informer()
-
-	// Track previous RollbackState to detect true→false transitions.
-	var prevStateMu sync.Mutex
-	var prevState RollbackState
 
 	// Add handlers for Deployments
 	deploymentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -316,7 +335,9 @@ func runController(ctx context.Context) {
 		},
 	})
 
-	// Watch ConfigMap for changes
+	// Watch ConfigMap for changes. Both Add and Update go through the same
+	// handler so we can diff old vs new config and trigger a reconcile pass
+	// when constraints or exclusion rules change.
 	configMapInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			cm, ok := obj.(*corev1.ConfigMap)
@@ -324,43 +345,20 @@ func runController(ctx context.Context) {
 				return
 			}
 			logInfo("configmap-add", "ConfigMap added, reloading config")
-			prevStateMu.Lock()
-			oldState := prevState
-			prevStateMu.Unlock()
-			loadConfig()
-			newState := currentRollbackState()
-			prevStateMu.Lock()
-			prevState = newState
-			prevStateMu.Unlock()
-			maybeTriggerRollback(ctx, oldState, newState)
+			onConfigMapEvent(ctx)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			cm, ok := newObj.(*corev1.ConfigMap)
 			if !ok || cm.Name != ConfigMapName {
 				return
 			}
-			// Capture pre-update state from in-memory config (since loadConfig
-			// hasn't run yet).
-			prevStateMu.Lock()
-			oldState := prevState
-			prevStateMu.Unlock()
 			logInfo("configmap-update", "ConfigMap updated, reloading config")
-			loadConfig()
-			newState := currentRollbackState()
-			prevStateMu.Lock()
-			prevState = newState
-			prevStateMu.Unlock()
-			maybeTriggerRollback(ctx, oldState, newState)
+			onConfigMapEvent(ctx)
 		},
 	})
 
 	factory.Start(ctx.Done())
 	factory.WaitForCacheSync(ctx.Done())
-
-	// Seed prevState after cache sync so we can detect future transitions.
-	prevStateMu.Lock()
-	prevState = currentRollbackState()
-	prevStateMu.Unlock()
 
 	logAlways("Controller started. Watching Deployments and StatefulSets...")
 
@@ -368,6 +366,130 @@ func runController(ctx context.Context) {
 	go runGarbageCollection(ctx)
 
 	<-ctx.Done()
+}
+
+// onConfigMapEvent is the shared body of the ConfigMap AddFunc/UpdateFunc
+// handlers. It captures the in-memory config + exclusion rules before
+// reloading, runs loadConfig, then computes transitions for both the
+// rollback path (true→false management flip) and the workload-reconcile
+// path (relevant config changed while management is enabled in apply mode).
+func onConfigMapEvent(ctx context.Context) {
+	configLock.RLock()
+	oldCfg := config
+	configLock.RUnlock()
+
+	rulesLock.RLock()
+	oldRules := append([]ExclusionRule(nil), exclusionRules...)
+	rulesLock.RUnlock()
+
+	loadConfig()
+
+	configLock.RLock()
+	newCfg := config
+	configLock.RUnlock()
+
+	rulesLock.RLock()
+	newRules := append([]ExclusionRule(nil), exclusionRules...)
+	rulesLock.RUnlock()
+
+	triggerRollback, triggerReconcile := onConfigMapChange(oldCfg, newCfg, oldRules, newRules)
+
+	if triggerRollback {
+		var oldState, newState RollbackState
+		if oldCfg != nil {
+			oldState = oldCfg.StateOf()
+		}
+		if newCfg != nil {
+			newState = newCfg.StateOf()
+		}
+		maybeTriggerRollback(ctx, oldState, newState)
+	}
+	if triggerReconcile {
+		triggerWorkloadReconcile(ctx)
+	}
+}
+
+// onConfigMapChange is a pure helper that decides, given a transition from
+// one ConfigMap state to another, whether the ConfigMap event should
+// trigger a rollback pass and/or a workload-reconcile pass. Extracted so
+// the orchestration logic can be unit-tested deterministically without
+// touching the global config/rules pointers or running goroutines.
+func onConfigMapChange(oldCfg, newCfg *TSCConfig, oldRules, newRules []ExclusionRule) (triggerRollback, triggerReconcile bool) {
+	var oldState, newState RollbackState
+	if oldCfg != nil {
+		oldState = oldCfg.StateOf()
+	}
+	if newCfg != nil {
+		newState = newCfg.StateOf()
+	}
+
+	if oldState.ManagementEnabled && !newState.ManagementEnabled && newState.RollbackOnDisable {
+		triggerRollback = true
+	}
+
+	if shouldReconcileOnConfigChange(oldCfg, newCfg, oldRules, newRules) {
+		triggerReconcile = true
+	}
+
+	return triggerRollback, triggerReconcile
+}
+
+// shouldReconcileOnConfigChange decides whether a ConfigMap event should
+// trigger a workload-reconcile pass. It returns false when management is
+// disabled or mode is recommend — those cases must not spawn a reconcile.
+// Exposed (lowercase but in the same package) so tests in main_test.go can
+// exercise the decision logic deterministically without touching globals.
+func shouldReconcileOnConfigChange(oldCfg, newCfg *TSCConfig, oldRules, newRules []ExclusionRule) bool {
+	if newCfg == nil || !newCfg.ManagementEnabled {
+		return false
+	}
+	if newCfg.Mode != ModeApply {
+		return false
+	}
+	if oldCfg == nil {
+		return true
+	}
+	if !oldCfg.ManagementEnabled {
+		return true
+	}
+	if oldCfg.Mode != ModeApply && newCfg.Mode == ModeApply {
+		return true
+	}
+	if constraintsChanged(oldCfg.DefaultConstraints, newCfg.DefaultConstraints) {
+		return true
+	}
+	if exclusionsChanged(oldRules, newRules) {
+		return true
+	}
+	return false
+}
+
+// constraintsChanged reports whether two topology-spread-constraint slices
+// differ. Uses reflect.DeepEqual because the slice contains nested fields
+// (LabelSelector, MatchLabelKeys, etc.) and a hand-rolled field comparison
+// is brittle.
+func constraintsChanged(old, new []corev1.TopologySpreadConstraint) bool {
+	return !reflect.DeepEqual(old, new)
+}
+
+// exclusionsChanged reports whether two exclusion-rule slices differ.
+func exclusionsChanged(old, new []ExclusionRule) bool {
+	return !reflect.DeepEqual(old, new)
+}
+
+// triggerWorkloadReconcile clears the processedWorkloads cache and spawns
+// reconcileAllWorkloadsFn in a fresh goroutine. The map replacement is
+// done under workloadsLock; the goroutine is launched after the lock is
+// released so concurrent controller paths can immediately repopulate
+// processedWorkloads without blocking on the reconcile listing.
+func triggerWorkloadReconcile(ctx context.Context) {
+	logInfo("reconcile-trigger", "ConfigMap change detected, triggering workload reconcile pass")
+
+	workloadsLock.Lock()
+	processedWorkloads = make(map[string]bool)
+	workloadsLock.Unlock()
+
+	go reconcileAllWorkloadsFn(ctx)
 }
 
 func currentRollbackState() RollbackState {
@@ -382,13 +504,12 @@ func currentRollbackState() RollbackState {
 func maybeTriggerRollback(ctx context.Context, oldState, newState RollbackState) {
 	if oldState.ManagementEnabled && !newState.ManagementEnabled && newState.RollbackOnDisable {
 		logInfo("rollback-trigger", "managementEnabled went true→false; triggering rollback asynchronously")
-		go runRollback(ctx)
+		go runRollbackFn(ctx, newState.OperatorNamespace)
 	}
 }
 
-func runRollback(ctx context.Context) {
+func runRollback(ctx context.Context, ns string) {
 	logger := snapshot.SimpleLogger{Info: logInfoSimple, Warn: logWarnSimple, Error: logErrorSimple}
-	ns := config.OperatorNamespace
 	lastRollbackRunMu.Lock()
 	lastRollbackRun = time.Now()
 	lastRollbackRunMu.Unlock()
@@ -1257,6 +1378,16 @@ func tryRetryRollback(ctx context.Context) {
 		return
 	}
 
+	// Capture the operator namespace under the config lock so the spawned
+	// rollback goroutine never has to read the mutable global `config`
+	// pointer (which would race with concurrent loadConfig calls).
+	configLock.RLock()
+	ns := config.OperatorNamespace
+	configLock.RUnlock()
+	if ns == "" {
+		return
+	}
+
 	pending, err := hasPendingRollback(ctx)
 	if err != nil {
 		logWarn("rollback-retry", "Failed to list snapshots for pending-rollback check: %v", err)
@@ -1278,7 +1409,7 @@ func tryRetryRollback(ctx context.Context) {
 	}
 
 	logInfo("rollback-retry", "Retrying rollback for snapshots not yet marked RolledBack")
-	runRollback(ctx)
+	runRollbackFn(ctx, ns)
 }
 
 func runReconcileLoop(ctx context.Context) {
