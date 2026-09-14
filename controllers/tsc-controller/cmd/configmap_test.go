@@ -47,8 +47,8 @@ func TestParseTSCConfig_Defaults(t *testing.T) {
 	if zone.TopologyKey != "topology.kubernetes.io/zone" {
 		t.Errorf("DefaultConstraints[0].TopologyKey = %q, want %q", zone.TopologyKey, "topology.kubernetes.io/zone")
 	}
-	if zone.WhenUnsatisfiable != corev1.DoNotSchedule {
-		t.Errorf("DefaultConstraints[0].WhenUnsatisfiable = %v, want %v", zone.WhenUnsatisfiable, corev1.DoNotSchedule)
+	if zone.WhenUnsatisfiable != corev1.ScheduleAnyway {
+		t.Errorf("DefaultConstraints[0].WhenUnsatisfiable = %v, want %v", zone.WhenUnsatisfiable, corev1.ScheduleAnyway)
 	}
 	hostname := cfg.DefaultConstraints[1]
 	if hostname.TopologyKey != "kubernetes.io/hostname" {
@@ -244,6 +244,24 @@ func TestParseTSCConfig_CanonicalManagementWinsOverDeprecatedEnableTSC(t *testin
 	}
 	if !cfg.ManagementEnabled {
 		t.Errorf("ManagementEnabled = false, want true (explicit managementEnabled should win)")
+	}
+}
+
+func TestParseTSCConfig_ExplicitDoNotSchedulePreserved(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			"defaultConstraints": `[{"maxSkew":1,"topologyKey":"topology.kubernetes.io/zone","whenUnsatisfiable":"DoNotSchedule"}]`,
+		},
+	}
+	cfg, errs := ParseTSCConfig(cm, "")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(cfg.DefaultConstraints) == 0 {
+		t.Fatalf("DefaultConstraints empty, want non-empty")
+	}
+	if got, want := cfg.DefaultConstraints[0].WhenUnsatisfiable, corev1.DoNotSchedule; got != want {
+		t.Errorf("DefaultConstraints[0].WhenUnsatisfiable = %q, want %q (explicit ConfigMap value should win over built-in default)", got, want)
 	}
 }
 
