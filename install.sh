@@ -669,38 +669,6 @@ for release in castai-tsc-controller castai-jvm-probe-controller castai-pdb-cont
   fi
 done
 
-# -------------------------
-# Helpers used by the post-install summary
-# -------------------------
-# print_cm_patch <cm_name> <mode>
-# Prints a multi-line YAML kubectl patch command for the given ConfigMap and
-# mode (apply|disable|recommend). Indentation mirrors the original ConfigMap
-# spec (data: at the top level, keys under data: indented one level) so
-# operators can read/edit the snippet before pasting it into a terminal.
-print_cm_patch() {
-  local cm_name="$1"
-  local mode="$2"
-  echo "    kubectl -n ${NAMESPACE} patch cm ${cm_name} --type merge -p - <<'EOF'"
-  echo "    data:"
-  case "$mode" in
-    apply)
-      echo "      managementEnabled: \"true\""
-      echo "      rollbackOnDisable: \"false\""
-      echo "      mode: \"apply\""
-      ;;
-    disable)
-      echo "      managementEnabled: \"false\""
-      echo "      rollbackOnDisable: \"true\""
-      ;;
-    recommend)
-      echo "      managementEnabled: \"true\""
-      echo "      rollbackOnDisable: \"false\""
-      echo "      mode: \"recommend\""
-      ;;
-  esac
-  echo "EOF"
-}
-
 # print_status_block
 # Prints a runtime status block: cluster name, detected CAST AI agent image
 # (or a fallback if the castai-agent Deployment is missing), and the current
@@ -763,19 +731,19 @@ echo "============================================================"
 echo ""
 if [ "$INSTALL_TSC" = true ]; then
   step "Enable TSC apply mode (default after install is recommend — controller only snapshots):"
-  print_cm_patch castai-tsc-controller-config apply
+  echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\",\"mode\":\"apply\"}}'"
   echo ""
   step "Disable TSC and rollback changes:"
-  print_cm_patch castai-tsc-controller-config disable
+  echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
   echo ""
   step "TSC recommend mode (capture snapshots but do not patch):"
-  print_cm_patch castai-tsc-controller-config recommend
+  echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"mode\":\"recommend\"}}'"
   echo ""
   step "Verify TSC snapshots:"
   echo "    kubectl get tscoriginals -n ${NAMESPACE}"
   echo ""
   step "Check TSC rollback status:"
-  echo "    kubectl get tscoriginals -n ${NAMESPACE} -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="RolledBack")].status}{"\n"}{end}'"
+  echo "    kubectl get tscoriginals -n ${NAMESPACE} -o jsonpath='{range .items[*]}{.metadata.name}{\"\t\"}{.status.conditions[?(@.type==\"RolledBack\")].status}{\"\n\"}{end}'"
   echo ""
 fi
 if [ "$INSTALL_JVM" = true ]; then
