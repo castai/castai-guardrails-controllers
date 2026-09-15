@@ -156,9 +156,9 @@ func ParseJVMConfig(cm *corev1.ConfigMap, envVersion string) (*JVMConfig, []erro
 			// Legacy migration: ConfigMaps that set mode=recommend used to
 			// select a snapshot-only mode. That mode is removed by the
 			// webhook migration — per-Pod admission has no snapshot-only
-			// mode. Normalize to ModeApply and log so operators can find
+			// mode. Normalize to ModeApply and warn so operators can find
 			// the legacy setting.
-			log.Printf("config-migrate: mode=recommend is no longer supported for JVM webhook; using mode=apply")
+			log.Printf("[WARN] config-migrate: mode=recommend is no longer supported for JVM webhook; using mode=apply")
 			cfg.Mode = ModeApply
 		default:
 			errs = append(errs, &unknownModeError{value: v})
