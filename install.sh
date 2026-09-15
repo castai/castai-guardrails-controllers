@@ -659,6 +659,66 @@ for release in castai-tsc-controller castai-jvm-probe-controller castai-pdb-cont
 done
 
 # -------------------------
+# Helpers used by the post-install summary
+# -------------------------
+# print_cm_patch <cm_name> <mode>
+# Prints a multi-line YAML kubectl patch command for the given ConfigMap and
+# mode (apply|disable|recommend). Indentation mirrors the original ConfigMap
+# spec (data: at the top level, keys under data: indented one level) so
+# operators can read/edit the snippet before pasting it into a terminal.
+print_cm_patch() {
+  local cm_name="$1"
+  local mode="$2"
+  echo "    kubectl -n ${NAMESPACE} patch cm ${cm_name} --type merge -p - <<'EOF'"
+  echo "    data:"
+  case "$mode" in
+    apply)
+      echo "      managementEnabled: \"true\""
+      echo "      rollbackOnDisable: \"false\""
+      echo "      mode: \"apply\""
+      ;;
+    disable)
+      echo "      managementEnabled: \"false\""
+      echo "      rollbackOnDisable: \"true\""
+      ;;
+    recommend)
+      echo "      managementEnabled: \"true\""
+      echo "      rollbackOnDisable: \"false\""
+      echo "      mode: \"recommend\""
+      ;;
+  esac
+  echo "EOF"
+}
+
+# print_status_block
+# Prints a runtime status block: cluster name, detected CAST AI agent image
+# (or a fallback if the castai-agent Deployment is missing), and the current
+# pods in $NAMESPACE. All kubectl calls are guarded so the script keeps going
+# even when the cluster is unreachable.
+print_status_block() {
+  local agent_image
+  agent_image="$(kubectl get deployment castai-agent -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+  echo ""
+  echo "============================================================"
+  echo " Status"
+  echo "============================================================"
+  echo "  Cluster : ${CLUSTER_NAME}"
+  if [ -n "$agent_image" ]; then
+    echo "  Agent   : ${agent_image%%:*}  version=${agent_image##*:}"
+  else
+    echo "  Agent   : castai-agent deployment not found in ${NAMESPACE}"
+  fi
+  echo ""
+  echo "  Running pods in ${NAMESPACE}:"
+  kubectl get pods -n "$NAMESPACE" || true
+}
+
+# -------------------------
+# Runtime status (cluster, agent, pods)
+# -------------------------
+print_status_block
+
+# -------------------------
 # Summary
 # -------------------------
 echo ""
@@ -666,13 +726,21 @@ echo "============================================================"
 ok "Installation finished."
 echo ""
 step "Watch controller logs:"
-echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-tsc-controller       --tail=50 -f"
-echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-jvm-probe-controller --tail=50 -f"
-echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-pdb-controller      --tail=50 -f"
+if [ "$INSTALL_TSC" = true ]; then
+  echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-tsc-controller       --tail=50 -f"
+fi
+if [ "$INSTALL_JVM" = true ]; then
+  echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-jvm-probe-controller --tail=50 -f"
+fi
+if [ "$INSTALL_PDB" = true ]; then
+  echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-pdb-controller      --tail=50 -f"
+fi
 echo ""
-step "PDB is live by default (FixPoorPDBs=true). To re-apply via Helm:"
-echo "    helm upgrade castai-pdb-controller ${PDB_CHART} -n ${NAMESPACE} --set config.FixPoorPDBs=\"true\""
-echo ""
+if [ "$INSTALL_PDB" = true ]; then
+  step "PDB is live by default (FixPoorPDBs=true). To re-apply via Helm:"
+  echo "    helm upgrade castai-pdb-controller ${PDB_CHART} -n ${NAMESPACE} --set config.FixPoorPDBs=\"true\""
+  echo ""
+fi
 step "Bypass a single workload with an annotation:"
 echo "    workloads.cast.ai/tsc-bypass: \"true\""
 echo "    workloads.cast.ai/jvm-probe-bypass: \"true\""
@@ -682,18 +750,20 @@ echo "============================================================"
 echo " Next steps"
 echo "============================================================"
 echo ""
-step "Enable apply mode (default after install is recommend — controllers only snapshot):"
-echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config       --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\",\"mode\":\"apply\"}}'"
-echo "    kubectl -n ${NAMESPACE} patch cm castai-jvm-probe-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\",\"mode\":\"apply\"}}'"
-echo ""
-step "Disable and rollback changes:"
-echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config       --type merge -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
-echo "    kubectl -n ${NAMESPACE} patch cm castai-jvm-probe-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
-echo ""
-step "Recommend mode (capture snapshots but do not patch):"
-echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config       --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"mode\":\"recommend\"}}'"
-echo "    kubectl -n ${NAMESPACE} patch cm castai-jvm-probe-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"mode\":\"recommend\"}}'"
-echo ""
+if [ "$INSTALL_TSC" = true ] || [ "$INSTALL_JVM" = true ]; then
+  step "Enable apply mode (default after install is recommend — controllers only snapshot):"
+  [ "$INSTALL_TSC" = true ] && print_cm_patch castai-tsc-controller-config apply
+  [ "$INSTALL_JVM" = true ] && print_cm_patch castai-jvm-probe-controller-config apply
+  echo ""
+  step "Disable and rollback changes:"
+  [ "$INSTALL_TSC" = true ] && print_cm_patch castai-tsc-controller-config disable
+  [ "$INSTALL_JVM" = true ] && print_cm_patch castai-jvm-probe-controller-config disable
+  echo ""
+  step "Recommend mode (capture snapshots but do not patch):"
+  [ "$INSTALL_TSC" = true ] && print_cm_patch castai-tsc-controller-config recommend
+  [ "$INSTALL_JVM" = true ] && print_cm_patch castai-jvm-probe-controller-config recommend
+  echo ""
+fi
 step "Verify snapshots:"
 echo "    kubectl get tscoriginals -n ${NAMESPACE}"
 echo "    kubectl get jvmprobeoriginals -n ${NAMESPACE}"
