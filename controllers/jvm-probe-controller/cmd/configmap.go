@@ -54,17 +54,16 @@ type JVMConfig struct {
 	Version           string `json:"version"`
 }
 
-// RollbackState is the immutable view used to detect transitions. The
-// snapshot/rollback knobs were removed during the webhook migration; the
-// remaining fields are kept so the TSC controller's rollback path can
-// still consume this view without a structural change.
+// RollbackState captures the previous ManagementEnabled, Mode, and
+// OperatorNamespace values so handleConfigMapUpdate can detect
+// transitions if needed in the future.
 type RollbackState struct {
 	ManagementEnabled bool
 	Mode              string
 	OperatorNamespace string
 }
 
-// StateOf returns the rollback-relevant subset of the config.
+// StateOf returns a snapshot of the transition-relevant fields.
 func (c *JVMConfig) StateOf() RollbackState {
 	if c == nil {
 		return RollbackState{}

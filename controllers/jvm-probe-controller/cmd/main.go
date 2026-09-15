@@ -21,13 +21,10 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 )
 
@@ -51,7 +48,6 @@ var (
 	tlsKeyFile  string
 
 	clientset      *kubernetes.Clientset
-	recorder       record.EventRecorder
 	config         *JVMConfig
 	configLock     sync.RWMutex
 	exclusionRules *ExclusionRules
@@ -80,16 +76,11 @@ type Controller struct {
 	configMap       cache.SharedIndexInformer
 }
 
-// NewController creates a new JVM Probe Controller. The event recorder is
-// installed so future code paths can emit events; the only informer that
-// remains is the ConfigMap informer used for hot-reload of JVMConfig.
+// NewController creates a new JVM Probe Controller. The only informer
+// that remains is the ConfigMap informer used for hot-reload of
+// JVMConfig; the Deployment/StatefulSet reconcile loop (and its
+// associated event recorder) was retired during the webhook migration.
 func NewController(clientset *kubernetes.Clientset, factory informers.SharedInformerFactory) *Controller {
-	// Create event recorder
-	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartLogging(klog.Infof)
-	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientset.CoreV1().Events("")})
-	recorder = eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: ControllerName})
-
 	configMapInformer := factory.Core().V1().ConfigMaps().Informer()
 
 	// ConfigMap event handler for hot-reload
