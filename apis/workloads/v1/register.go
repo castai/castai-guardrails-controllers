@@ -28,10 +28,9 @@ var (
 	AddToScheme = SchemeBuilder.AddToScheme
 )
 
-// Kind names for the two snapshot CRDs.
+// Kind names for the snapshot CRD.
 const (
-	KindTSCOriginal      = "TSCOriginal"
-	KindJVMProbeOriginal = "JVMProbeOriginal"
+	KindTSCOriginal = "TSCOriginal"
 )
 
 // addKnownTypes registers the workload snapshot types with the given scheme.
@@ -39,8 +38,6 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&TSCOriginal{},
 		&TSCOriginalList{},
-		&JVMProbeOriginal{},
-		&JVMProbeOriginalList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

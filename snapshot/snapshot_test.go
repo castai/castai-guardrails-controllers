@@ -17,7 +17,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 
 	workloadsv1 "github.com/castai/castai-guardrails-controllers/apis/workloads/v1"
 )
@@ -623,57 +622,6 @@ func TestSerializationRoundtrip_TSCOriginal_NilVsEmpty(t *testing.T) {
 	assert.Nil(t, rtNil.Spec.OriginalTSCs)
 	assert.False(t, rtNil.Spec.OriginalTSCsPresent)
 	assert.True(t, rtEmpty.Spec.OriginalTSCsPresent)
-}
-
-func TestSerializationRoundtrip_JVMProbeOriginal(t *testing.T) {
-	probe := &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt(8080)},
-		},
-		PeriodSeconds:    10,
-		TimeoutSeconds:   1,
-		SuccessThreshold: 1,
-	}
-	all := &workloadsv1.JVMProbeOriginal{
-		ObjectMeta: metav1.ObjectMeta{Name: "j", Namespace: "y"},
-		Spec: workloadsv1.JVMProbeOriginalSpec{
-			TargetRef: workloadsv1.TargetRef{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "y", Name: "n", UID: "u"},
-			OriginalContainers: map[string]workloadsv1.ContainerProbes{
-				"app": {LivenessProbe: probe, ReadinessProbe: probe, StartupProbe: probe,
-					LivenessPresent: true, ReadinessPresent: true, StartupPresent: true},
-			},
-			CapturedAt: metav1.Now(),
-		},
-	}
-	none := all.DeepCopy()
-	none.Spec.OriginalContainers = nil
-
-	for _, tc := range []struct {
-		name string
-		in   *workloadsv1.JVMProbeOriginal
-	}{
-		{"all-probes-present", all},
-		{"no-containers", none},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			data, err := json.Marshal(tc.in)
-			require.NoError(t, err)
-			var rt workloadsv1.JVMProbeOriginal
-			require.NoError(t, json.Unmarshal(data, &rt))
-			if tc.in.Spec.OriginalContainers == nil {
-				assert.Nil(t, rt.Spec.OriginalContainers)
-			} else {
-				require.Len(t, rt.Spec.OriginalContainers, 1)
-				cp := rt.Spec.OriginalContainers["app"]
-				assert.NotNil(t, cp.LivenessProbe)
-				assert.NotNil(t, cp.ReadinessProbe)
-				assert.NotNil(t, cp.StartupProbe)
-				assert.True(t, cp.LivenessPresent)
-				assert.True(t, cp.ReadinessPresent)
-				assert.True(t, cp.StartupPresent)
-			}
-		})
-	}
 }
 
 // ===== Annotation helper test =====

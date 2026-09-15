@@ -27,6 +27,19 @@ const (
 	AnnotationJVMInjectLiveness   = AnnotationPrefix + "inject-liveness"
 	AnnotationJVMInjectReadiness  = AnnotationPrefix + "inject-readiness"
 	AnnotationJVMInjectStartup    = AnnotationPrefix + "inject-startup"
+
+	// Chunk 2: Pod-mutation-only annotations.
+	// AnnotationJVMProbeStartupPeriod overrides periodSeconds for the
+	// injected startup probe.
+	AnnotationJVMProbeStartupPeriod = AnnotationPrefix + "startup-period"
+
+	// AnnotationJVMProbeStartupFailureThreshold overrides failureThreshold
+	// for the injected startup probe.
+	AnnotationJVMProbeStartupFailureThreshold = AnnotationPrefix + "startup-failure-threshold"
+
+	// AnnotationJVMProbeClearDelays removes initialDelaySeconds from the
+	// existing liveness/readiness probes when set to a truthy value.
+	AnnotationJVMProbeClearDelays = AnnotationPrefix + "clear-delays"
 )
 
 // ShouldOverwriteAll checks if all probes should be overwritten
@@ -107,4 +120,11 @@ func ShouldInjectStartup(annotations map[string]string, configDefault bool) bool
 		return configDefault
 	}
 	return val == "true" || val == "yes" || val == "1"
+}
+
+// ShouldClearDelays reports whether the Pod annotation requests removal of
+// initialDelaySeconds from existing liveness/readiness probes.
+func ShouldClearDelays(annotations map[string]string) bool {
+	val, ok := annotations[AnnotationJVMProbeClearDelays]
+	return ok && (val == "true" || val == "yes" || val == "1")
 }

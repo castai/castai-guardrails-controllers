@@ -2,9 +2,8 @@
 // Copyright Authors of castai-guardrails-controllers
 
 // Package snapshot provides the shared capture-and-rollback machinery used by
-// both tsc-controller and jvm-probe-controller. It abstracts the workload
-// type (TSCOriginal vs JVMProbeOriginal) via a small Accessor pattern so each
-// controller gets a typed client without duplicating logic.
+// the tsc-controller. It abstracts the workload type via a small Accessor
+// pattern so each controller gets a typed client without duplicating logic.
 package snapshot
 
 import (
@@ -45,8 +44,8 @@ type Accessor[T any] struct {
 }
 
 // Client is the narrow subset of typed-client operations the snapshot module
-// needs. Implementations wrap generated clientsets (TSCOriginal /
-// JVMProbeOriginal). Tests provide fakes.
+// needs. Implementations wrap generated clientsets (TSCOriginal).
+// Tests provide fakes.
 //
 // Methods take a namespace argument so the implementation can target a
 // namespace-scoped clientset without needing to be rebuilt on each call.

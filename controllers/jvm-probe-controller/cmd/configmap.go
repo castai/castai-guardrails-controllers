@@ -14,24 +14,26 @@ import (
 
 // Mode values for JVMConfig.Mode.
 const (
-	ModeApply     = "apply"
-	ModeRecommend = "recommend"
+	ModeApply = "apply"
 )
 
 // JVMConfig holds the controller configuration loaded from the ConfigMap plus
-// any environment-derived overrides. Mirrors the TSCConfig shape so the
-// rollback/snapshot state machine can be shared.
+// any environment-derived overrides.
 //
 // Canonical model:
 //   - ManagementEnabled: master switch. false = stop patching.
-//   - Mode:              "apply" (patch) or "recommend" (snapshot-only).
-//   - RollbackOnDisable: when true and ManagementEnabled flips true→false,
-//                        run rollback.
-//   - SnapshotEnabled:   capture snapshots.
+//   - Mode:              "apply" (patch). The previous "recommend" mode is
+//                        removed in the webhook migration: per-Pod admission
+//                        has no snapshot-only mode. Only "apply" is valid
+//                        for the webhook. Legacy ConfigMaps that set
+//                        mode=recommend are migrated to mode=apply at load
+//                        time with an info-level log line.
 //
-// Deprecated keys (jvm-enableProbeManagement, jvm-dryRun) are still parsed for
-// backward compatibility and mapped onto the canonical fields with a
-// deprecation warning logged.
+// Deprecated keys (jvm-enableProbeManagement, jvm-dryRun) are still parsed
+// for backward compatibility. jvm-enableProbeManagement maps onto
+// ManagementEnabled; jvm-dryRun=true previously mapped to Mode=recommend
+// (snapshot-only) and is now logged at error level and ignored because
+// the controller runs as a live mutating webhook.
 type JVMConfig struct {
 	// Existing fields
 	Frameworks            map[string]FrameworkConfig `json:"frameworks"`
@@ -45,34 +47,30 @@ type JVMConfig struct {
 	InjectStartupProbe    bool                       `json:"injectStartupProbe"`
 	LogIntendedChanges    bool                       `json:"logIntendedChanges"`
 
-	// New fields for PR3 (rollback + snapshot wiring)
+	// Canonical state fields
 	ManagementEnabled bool   `json:"managementEnabled"`
-	RollbackOnDisable bool   `json:"rollbackOnDisable"`
 	Mode              string `json:"mode"`
-	SnapshotEnabled   bool   `json:"snapshotEnabled"`
 	OperatorNamespace string `json:"operatorNamespace"`
 	Version           string `json:"version"`
 }
 
-// RollbackState is the immutable view used to detect transitions.
+// RollbackState captures the previous ManagementEnabled, Mode, and
+// OperatorNamespace values so handleConfigMapUpdate can detect
+// transitions if needed in the future.
 type RollbackState struct {
 	ManagementEnabled bool
-	RollbackOnDisable bool
 	Mode              string
-	SnapshotEnabled   bool
 	OperatorNamespace string
 }
 
-// StateOf returns the rollback-relevant subset of the config.
+// StateOf returns a snapshot of the transition-relevant fields.
 func (c *JVMConfig) StateOf() RollbackState {
 	if c == nil {
 		return RollbackState{}
 	}
 	return RollbackState{
 		ManagementEnabled: c.ManagementEnabled,
-		RollbackOnDisable: c.RollbackOnDisable,
 		Mode:              c.Mode,
-		SnapshotEnabled:   c.SnapshotEnabled,
 		OperatorNamespace: c.OperatorNamespace,
 	}
 }
@@ -81,8 +79,8 @@ func (c *JVMConfig) StateOf() RollbackState {
 // env-supplied version. Returns the config and any per-key parse errors.
 //
 // Deprecated keys (jvm-enableProbeManagement, jvm-dryRun) are accepted for
-// backward compatibility: a deprecation warning is logged and the canonical
-// fields are updated. An explicit canonical key always wins.
+// backward compatibility: a deprecation warning is logged. An explicit
+// canonical key always wins.
 func ParseJVMConfig(cm *corev1.ConfigMap, envVersion string) (*JVMConfig, []error) {
 	def := DefaultJVMConfig()
 	cfg := &def
@@ -145,23 +143,25 @@ func ParseJVMConfig(cm *corev1.ConfigMap, envVersion string) (*JVMConfig, []erro
 		cfg.LogIntendedChanges = v == "true"
 	}
 
-	// PR3 fields (canonical, no jvm- prefix — matches the rendered ConfigMap).
+	// Canonical state fields (no jvm- prefix — matches the rendered ConfigMap).
 	if v, ok := data["managementEnabled"]; ok && v != "" {
 		cfg.ManagementEnabled = parseBool(v, true)
 	}
-	if v, ok := data["rollbackOnDisable"]; ok && v != "" {
-		cfg.RollbackOnDisable = parseBool(v, false)
-	}
 	if v, ok := data["mode"]; ok && v != "" {
 		switch v {
-		case ModeApply, ModeRecommend:
+		case ModeApply:
 			cfg.Mode = v
+		case "recommend":
+			// Legacy migration: ConfigMaps that set mode=recommend used to
+			// select a snapshot-only mode. That mode is removed by the
+			// webhook migration — per-Pod admission has no snapshot-only
+			// mode. Normalize to ModeApply and warn so operators can find
+			// the legacy setting.
+			log.Printf("[WARN] config-migrate: mode=recommend is no longer supported for JVM webhook; using mode=apply")
+			cfg.Mode = ModeApply
 		default:
 			errs = append(errs, &unknownModeError{value: v})
 		}
-	}
-	if v, ok := data["snapshotEnabled"]; ok && v != "" {
-		cfg.SnapshotEnabled = parseBool(v, true)
 	}
 	if v, ok := data["operatorNamespace"]; ok && v != "" {
 		cfg.OperatorNamespace = v
@@ -169,7 +169,10 @@ func ParseJVMConfig(cm *corev1.ConfigMap, envVersion string) (*JVMConfig, []erro
 
 	// Deprecated keys — backward compatibility mapping.
 	// jvm-enableProbeManagement=false → ManagementEnabled=false.
-	// jvm-dryRun=true → Mode=recommend.
+	// jvm-dryRun=true → previously mapped to Mode=recommend; the
+	// recommend mode is removed by the webhook migration, so the key is
+	// now logged at error level and ignored. The controller now runs as a
+	// live mutating webhook.
 	// Canonical keys (set above) win.
 	if v, ok := data["jvm-enableProbeManagement"]; ok {
 		log.Printf("[WARN] config-deprecated: jvm-enableProbeManagement is deprecated, use managementEnabled")
@@ -179,12 +182,7 @@ func ParseJVMConfig(cm *corev1.ConfigMap, envVersion string) (*JVMConfig, []erro
 		}
 	}
 	if v, ok := data["jvm-dryRun"]; ok {
-		log.Printf("[WARN] config-deprecated: jvm-dryRun is deprecated, use mode=recommend")
-		if v == "true" {
-			if _, explicit := data["mode"]; !explicit {
-				cfg.Mode = ModeRecommend
-			}
-		}
+		log.Printf("[ERROR] config-deprecated: jvm-dryRun=%s is no longer supported; the JVM controller now runs as a live mutating webhook (mode=apply). The controller will mutate Pods on admission.", v)
 	}
 
 	return cfg, errs

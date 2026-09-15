@@ -18,14 +18,8 @@ func TestParseJVMConfig_Defaults(t *testing.T) {
 	if !cfg.ManagementEnabled {
 		t.Errorf("ManagementEnabled default = false, want true")
 	}
-	if cfg.RollbackOnDisable {
-		t.Errorf("RollbackOnDisable default = true, want false")
-	}
 	if cfg.Mode != ModeApply {
 		t.Errorf("Mode default = %q, want %q", cfg.Mode, ModeApply)
-	}
-	if !cfg.SnapshotEnabled {
-		t.Errorf("SnapshotEnabled default = false, want true")
 	}
 	if cfg.OperatorNamespace != "castai-agent" {
 		t.Errorf("OperatorNamespace default = %q, want castai-agent", cfg.OperatorNamespace)
@@ -62,48 +56,51 @@ func TestParseJVMConfig_OverrideManagement(t *testing.T) {
 	}
 }
 
-func TestParseJVMConfig_OverrideRollbackOnDisable(t *testing.T) {
+func TestParseJVMConfig_OverrideModeApply(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
-			"rollbackOnDisable": "true",
+			"mode": ModeApply,
 		},
 	}
 	cfg, errs := ParseJVMConfig(cm, "")
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	if !cfg.RollbackOnDisable {
-		t.Errorf("RollbackOnDisable = false, want true")
+	if cfg.Mode != ModeApply {
+		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeApply)
 	}
 }
 
-func TestParseJVMConfig_OverrideModeRecommend(t *testing.T) {
+func TestParseJVMConfig_LegacyRecommendModeMigratedToApply(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
-			"mode": ModeRecommend,
+			"mode": "recommend",
 		},
 	}
 	cfg, errs := ParseJVMConfig(cm, "")
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	if cfg.Mode != ModeRecommend {
-		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeRecommend)
+	if cfg.Mode != ModeApply {
+		t.Errorf("Mode = %q, want %q (mode=recommend should be migrated to apply)", cfg.Mode, ModeApply)
 	}
 }
 
-func TestParseJVMConfig_OverrideSnapshotDisabled(t *testing.T) {
+func TestParseJVMConfig_LegacyRecommendDoesNotReturnError(t *testing.T) {
+	// The previous behavior of ParseJVMConfig was to return an
+	// unknownModeError for mode=recommend. The webhook migration
+	// normalizes that value silently so legacy ConfigMaps do not produce
+	// a noisy error stream on every reconcile.
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
-			"snapshotEnabled": "false",
+			"mode": "recommend",
 		},
 	}
-	cfg, errs := ParseJVMConfig(cm, "")
-	if len(errs) != 0 {
-		t.Fatalf("unexpected errors: %v", errs)
-	}
-	if cfg.SnapshotEnabled {
-		t.Errorf("SnapshotEnabled = true, want false")
+	_, errs := ParseJVMConfig(cm, "")
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "recommend") {
+			t.Errorf("mode=recommend should not produce an error, got: %v", e)
+		}
 	}
 }
 
@@ -197,7 +194,7 @@ func TestParseJVMConfig_DeprecatedEnableProbeManagementFalse(t *testing.T) {
 	}
 }
 
-func TestParseJVMConfig_DeprecatedDryRunTrueMapsToRecommend(t *testing.T) {
+func TestParseJVMConfig_DeprecatedDryRunIsIgnored(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
 			"jvm-dryRun": "true",
@@ -207,15 +204,20 @@ func TestParseJVMConfig_DeprecatedDryRunTrueMapsToRecommend(t *testing.T) {
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	if cfg.Mode != ModeRecommend {
-		t.Errorf("Mode = %q, want %q (mapped from deprecated jvm-dryRun=true)", cfg.Mode, ModeRecommend)
+	// jvm-dryRun used to map to Mode=recommend. The webhook migration
+	// removes the recommend mode entirely; the deprecated key is now a
+	// no-op, the controller defaults to Mode=apply, and no error is
+	// returned. An error-level log is emitted (covered by the message
+	// expectations in main.go and the migration block above).
+	if cfg.Mode != ModeApply {
+		t.Errorf("Mode = %q, want %q (jvm-dryRun should be ignored)", cfg.Mode, ModeApply)
 	}
 }
 
 func TestParseJVMConfig_CanonicalModeWinsOverDeprecatedDryRun(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
-			"mode":      ModeApply,
+			"mode":       ModeApply,
 			"jvm-dryRun": "true",
 		},
 	}
@@ -231,21 +233,19 @@ func TestParseJVMConfig_CanonicalModeWinsOverDeprecatedDryRun(t *testing.T) {
 func TestJVMConfig_StateOf(t *testing.T) {
 	cfg := &JVMConfig{
 		ManagementEnabled: true,
-		RollbackOnDisable: true,
-		Mode:              ModeRecommend,
-		SnapshotEnabled:   false,
+		Mode:              ModeApply,
 		OperatorNamespace: "ns1",
 	}
 	st := cfg.StateOf()
-	if st.ManagementEnabled != true || st.RollbackOnDisable != true ||
-		st.Mode != ModeRecommend || st.SnapshotEnabled != false ||
+	if st.ManagementEnabled != true ||
+		st.Mode != ModeApply ||
 		st.OperatorNamespace != "ns1" {
 		t.Errorf("StateOf = %+v, want all fields mirrored", st)
 	}
 
 	var nilCfg *JVMConfig
-	if st := nilCfg.StateOf(); st.ManagementEnabled || st.RollbackOnDisable ||
-		st.Mode != "" || st.SnapshotEnabled || st.OperatorNamespace != "" {
+	if st := nilCfg.StateOf(); st.ManagementEnabled ||
+		st.Mode != "" || st.OperatorNamespace != "" {
 		t.Errorf("nil StateOf should be zero-value, got %+v", st)
 	}
 }
