@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -90,11 +89,9 @@ func DefaultJVMConfig() JVMConfig {
 		InjectReadinessProbe:   true,
 		InjectStartupProbe:     true,
 		LogIntendedChanges:     true,
-		// PR3 defaults
+		// Canonical state defaults
 		ManagementEnabled:      true,
-		RollbackOnDisable:      false,
 		Mode:                   ModeApply,
-		SnapshotEnabled:        true,
 		OperatorNamespace:      "castai-agent",
 		Version:                "dev",
 	}
@@ -222,75 +219,14 @@ func getAnnotationBool(annotations map[string]string, key string, fallback bool)
 	return fallback
 }
 
-// NeedsProbes checks if a container needs probes injected
-// Returns three bools: needsLiveness, needsReadiness, needsStartup
-func NeedsProbes(container corev1.Container, requireBoth bool) (needsLiveness, needsReadiness, needsStartup bool) {
-	hasLiveness := container.LivenessProbe != nil
-	hasReadiness := container.ReadinessProbe != nil
-	hasStartup := container.StartupProbe != nil
-
-	if requireBoth {
-		// Only inject liveness/readiness if BOTH are missing
-		needsLiveness = !hasLiveness
-		needsReadiness = !hasReadiness
-	} else {
-		needsLiveness = !hasLiveness
-		needsReadiness = !hasReadiness
+// CloneProbe returns a deep copy of the given probe, or nil if the input is nil.
+// The webhook mutation function uses this to copy an existing liveness/readiness
+// probe into a startup probe without aliasing the source struct.
+func CloneProbe(probe *corev1.Probe) *corev1.Probe {
+	if probe == nil {
+		return nil
 	}
-
-	// P2: Startup is ALWAYS independent - inject if missing (for JVM containers)
-	needsStartup = !hasStartup
-
-	return needsLiveness, needsReadiness, needsStartup
-}
-
-// HasAnyProbes checks if a container has any probes defined
-func HasAnyProbes(container corev1.Container) bool {
-	return container.LivenessProbe != nil || container.ReadinessProbe != nil || container.StartupProbe != nil
-}
-
-// HasCastaiManagedProbes checks if probes were added by this controller
-func HasCastaiManagedProbes(container corev1.Container) bool {
-	// Check if the container has our annotation marker
-	// This is a best-effort check - we can also check the workload annotations
-	return false // Will be implemented via workload annotation
-}
-
-// HasCastaiManagedProbesOnWorkload checks if the workload has the managed annotation
-func HasCastaiManagedProbesOnWorkload(annotations map[string]string) bool {
-	val, ok := annotations[AnnotationJVMProbeManaged]
-	return ok && val == "true"
-}
-
-// CreateProbePatch creates a JSON Patch to add probes to a container
-func CreateProbePatch(containerIndex int, liveness, readiness, startup *corev1.Probe) []map[string]interface{} {
-	patch := make([]map[string]interface{}, 0)
-
-	if liveness != nil {
-		patch = append(patch, map[string]interface{}{
-			"op":    "add",
-			"path":  fmt.Sprintf("/spec/template/spec/containers/%d/livenessProbe", containerIndex),
-			"value": liveness,
-		})
-	}
-
-	if readiness != nil {
-		patch = append(patch, map[string]interface{}{
-			"op":    "add",
-			"path":  fmt.Sprintf("/spec/template/spec/containers/%d/readinessProbe", containerIndex),
-			"value": readiness,
-		})
-	}
-
-	if startup != nil {
-		patch = append(patch, map[string]interface{}{
-			"op":    "add",
-			"path":  fmt.Sprintf("/spec/template/spec/containers/%d/startupProbe", containerIndex),
-			"value": startup,
-		})
-	}
-
-	return patch
+	return probe.DeepCopy()
 }
 
 // Annotations for probe injection tracking

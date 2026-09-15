@@ -5,7 +5,7 @@ metadata:
   namespace: castai-agent
 data:
   defaultConstraints: |
-    [{"maxSkew":1,"topologyKey":"topology.kubernetes.io/zone","whenUnsatisfiable":"DoNotSchedule"}]
+    [{"maxSkew":1,"topologyKey":"topology.kubernetes.io/zone","whenUnsatisfiable":"ScheduleAnyway"}]
   skipSingleReplica: "true"
   reconcileInterval: "2m"
   garbageCollectInterval: "5m"

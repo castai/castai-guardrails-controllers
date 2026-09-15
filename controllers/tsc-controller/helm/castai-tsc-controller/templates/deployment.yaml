@@ -35,6 +35,7 @@ spec:
         {{- toYaml .Values.podLabels | nindent 8 }}
         {{- end }}
         app.kubernetes.io/component: controller
+        workloads.cast.ai/tsc-controller: "true"
     spec:
       serviceAccountName: {{ include "castai-tsc-controller.serviceAccountName" . }}
       securityContext:

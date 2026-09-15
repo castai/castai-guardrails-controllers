@@ -294,16 +294,6 @@ kubectl logs -n castai-agent -l app.kubernetes.io/name=castai-jvm-probe-controll
 kubectl logs -n castai-agent -l app.kubernetes.io/name=castai-jvm-probe-controller -f
 ```
 
-### Events
-
-```bash
-# Watch for probe-related events
-kubectl get events --field-selector reason=ProbesAdded
-
-# Watch for auto-fix events
-kubectl get events --field-selector reason=ProbeFixApplied
-```
-
 ### Verify Probes
 
 ```bash

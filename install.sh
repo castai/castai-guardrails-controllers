@@ -38,11 +38,13 @@ INSTALL_JVM="${INSTALL_JVM:-}"
 INSTALL_PDB="${INSTALL_PDB:-}"
 
 # Per-controller overrides (non-interactive only — interactive uses defaults)
-# Mode is canonical: "apply" (mutate workloads) or "recommend" (snapshot only).
+# TSC mode is canonical: "apply" (mutate workloads) or "recommend" (snapshot only).
 # Default is "recommend" so a fresh install captures original workload state
 # without mutating workloads; operators must explicitly opt in to apply.
+# The JVM controller is now a Pod-mutating admission webhook; it runs in
+# apply mode implicitly and is configured via Helm values (webhook.enabled,
+# webhook.failurePolicy, certManager.enabled, ...) rather than a runtime mode.
 TSC_MODE="${TSC_MODE:-recommend}"
-JVM_MODE="${JVM_MODE:-recommend}"
 TSC_IMAGE_TAG_OVERRIDE="${TSC_IMAGE_TAG:-}"
 JVM_IMAGE_TAG_OVERRIDE="${JVM_IMAGE_TAG:-}"
 PDB_IMAGE_TAG_OVERRIDE="${PDB_IMAGE_TAG:-}"
@@ -159,7 +161,6 @@ log_install_failure() {
     echo "INSTALL_JVM=${INSTALL_JVM:-false}"
     echo "INSTALL_PDB=${INSTALL_PDB:-false}"
     [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_MODE=${TSC_MODE}"
-    [ "${INSTALL_JVM:-false}" = true ] && echo "  JVM_MODE=${JVM_MODE}"
     echo ""
     echo "--- Helm command ---"
     printf 'helm'
@@ -478,7 +479,9 @@ configure_mode() {
 }
 
 [ "$INSTALL_TSC" = true ] && configure_mode TSC "$TSC_MODE"
-[ "$INSTALL_JVM" = true ] && configure_mode JVM "$JVM_MODE"
+# JVM has no runtime mode toggle — it runs as a Pod-mutating admission webhook
+# in apply mode by default. Configure webhook behaviour via Helm values
+# (webhook.enabled, webhook.failurePolicy, certManager.enabled, ...).
 # PDB has no mode toggle; FixPoorPDBs is enabled by default (controller is live on install).
 
 # -------------------------
@@ -492,7 +495,7 @@ if [ "$IS_INTERACTIVE" = true ]; then
   echo "  Namespace : ${NAMESPACE}"
   echo "  Cluster   : ${CLUSTER_NAME}"
   [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_IMAGE_TAG_OVERRIDE:-$TSC_TAG_DEFAULT}  mode=${TSC_MODE}"
-  [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-$JVM_TAG_DEFAULT}  mode=${JVM_MODE}"
+  [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-$JVM_TAG_DEFAULT}  (webhook, apply)"
   [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_IMAGE_TAG_OVERRIDE:-$PDB_TAG_DEFAULT}  FixPoorPDBs=true (live)"
   echo ""
 
@@ -562,6 +565,9 @@ fi
 # -------------------------
 install_chart() {
   # install_chart <release> <chart_dir> <app_version> <mode> <prefix>
+  # <mode> is only consumed by the TSC controller. The JVM controller is a
+  # Pod-mutating admission webhook with no runtime mode, and PDB has no mode
+  # toggle; both pass an empty mode.
   local release="$1"
   local chart="$2"
   local app_version="$3"
@@ -578,7 +584,8 @@ install_chart() {
     image_tag="${!default_var}"
   fi
 
-  step "Installing ${release} (tag=${image_tag}, mode=${mode})"
+  # Show mode only when set (TSC); JVM/PDB leave it empty.
+  step "Installing ${release} (tag=${image_tag}${mode:+, mode=${mode}})"
 
   # Build helm args as array (safe)
   local -a args
@@ -587,21 +594,25 @@ install_chart() {
         --set image.tag="$image_tag"
         --set image.pullPolicy="$IMAGE_PULL_POLICY"
         --set replicaCount=2
-        --set management.enabled=true
-        --set management.mode="$mode"
-        --set management.rollbackOnDisable=false
         --create-namespace)
 
-  # Controller-specific: CRD ownership and additional config.
+  # Controller-specific: mode (TSC), CRD ownership, and additional config.
   case "$prefix" in
     TSC)
+      args+=(--set management.enabled=true)
+      args+=(--set management.mode="$mode")
+      args+=(--set management.rollbackOnDisable=false)
       # CRDs are installed as a standalone release (castai-guardrails-crds) by
       # install.sh to avoid ownership conflicts between controllers.
       args+=(--set crds.enabled=false) ;;
     JVM)
       # CRDs are installed as a standalone release (castai-guardrails-crds) by
       # install.sh to avoid ownership conflicts between controllers.
-      args+=(--set crds.enabled=false) ;;
+      args+=(--set crds.enabled=false)
+      # JVM is a Pod-mutating admission webhook; behaviour is governed by
+      # Helm values (webhook.enabled, webhook.failurePolicy, certManager.enabled,
+      # ...) rather than a runtime management mode.
+      ;;
     PDB)
       # PDB has no mode toggle. FixPoorPDBs is enabled by default so the
       # controller auto-remediates poor PDBs immediately on install.
@@ -632,7 +643,7 @@ if [ "$INSTALL_TSC" = true ]; then
   install_chart castai-tsc-controller      "$TSC_CHART" "$TSC_APP" "$TSC_MODE" TSC
 fi
 if [ "$INSTALL_JVM" = true ]; then
-  install_chart castai-jvm-probe-controller "$JVM_CHART" "$JVM_APP" "$JVM_MODE" JVM
+  install_chart castai-jvm-probe-controller "$JVM_CHART" "$JVM_APP" "" JVM
 fi
 if [ "$INSTALL_PDB" = true ]; then
   install_chart castai-pdb-controller     "$PDB_CHART" "$PDB_APP" "" PDB
@@ -750,26 +761,29 @@ echo "============================================================"
 echo " Next steps"
 echo "============================================================"
 echo ""
-if [ "$INSTALL_TSC" = true ] || [ "$INSTALL_JVM" = true ]; then
-  step "Enable apply mode (default after install is recommend — controllers only snapshot):"
-  [ "$INSTALL_TSC" = true ] && print_cm_patch castai-tsc-controller-config apply
-  [ "$INSTALL_JVM" = true ] && print_cm_patch castai-jvm-probe-controller-config apply
+if [ "$INSTALL_TSC" = true ]; then
+  step "Enable TSC apply mode (default after install is recommend — controller only snapshots):"
+  print_cm_patch castai-tsc-controller-config apply
   echo ""
-  step "Disable and rollback changes:"
-  [ "$INSTALL_TSC" = true ] && print_cm_patch castai-tsc-controller-config disable
-  [ "$INSTALL_JVM" = true ] && print_cm_patch castai-jvm-probe-controller-config disable
+  step "Disable TSC and rollback changes:"
+  print_cm_patch castai-tsc-controller-config disable
   echo ""
-  step "Recommend mode (capture snapshots but do not patch):"
-  [ "$INSTALL_TSC" = true ] && print_cm_patch castai-tsc-controller-config recommend
-  [ "$INSTALL_JVM" = true ] && print_cm_patch castai-jvm-probe-controller-config recommend
+  step "TSC recommend mode (capture snapshots but do not patch):"
+  print_cm_patch castai-tsc-controller-config recommend
+  echo ""
+  step "Verify TSC snapshots:"
+  echo "    kubectl get tscoriginals -n ${NAMESPACE}"
+  echo ""
+  step "Check TSC rollback status:"
+  echo "    kubectl get tscoriginals -n ${NAMESPACE} -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="RolledBack")].status}{"\n"}{end}'"
   echo ""
 fi
-step "Verify snapshots:"
-echo "    kubectl get tscoriginals -n ${NAMESPACE}"
-echo "    kubectl get jvmprobeoriginals -n ${NAMESPACE}"
-echo ""
-step "Check rollback status:"
-echo "    kubectl get tscoriginals -n ${NAMESPACE} -o jsonpath='{range .items[*]}{.metadata.name}{\"\t\"}{.status.conditions[?(@.type==\"RolledBack\")].status}{\"\n\"}{end}'"
+if [ "$INSTALL_JVM" = true ]; then
+  step "The JVM controller is a Pod-mutating admission webhook; it has no runtime"
+  step "mode toggle. Configure it via Helm values (webhook.enabled,"
+  step "webhook.failurePolicy, certManager.enabled, ...) on the JVM chart."
+  echo ""
+fi
 echo ""
 step "See docs/rollback-operator-runbook.md for the full runbook."
 echo "============================================================"

@@ -18,7 +18,6 @@ var workloadsv1SchemeGroupVersion = workloadsv1.SchemeGroupVersion
 // WorkloadsV1Interface groups the per-resource typed clients under workloads.cast.ai/v1.
 type WorkloadsV1Interface interface {
 	TSCOriginals(namespace string) TSCOriginalInterface
-	JVMProbeOriginals(namespace string) JVMProbeOriginalInterface
 }
 
 // WorkloadsV1Client is the concrete implementation of WorkloadsV1Interface.
@@ -69,8 +68,4 @@ var groupVersion = workloadsv1SchemeGroupVersion
 
 func (c *WorkloadsV1Client) TSCOriginals(namespace string) TSCOriginalInterface {
 	return newTSCOriginalClient(c.restClient, namespace)
-}
-
-func (c *WorkloadsV1Client) JVMProbeOriginals(namespace string) JVMProbeOriginalInterface {
-	return newJVMProbeOriginalClient(c.restClient, namespace)
 }

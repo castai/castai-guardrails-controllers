@@ -226,7 +226,12 @@ func defaultConstraints() []corev1.TopologySpreadConstraint {
 		{
 			MaxSkew:           1,
 			TopologyKey:       "topology.kubernetes.io/zone",
-			WhenUnsatisfiable: corev1.DoNotSchedule,
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
+		},
+		{
+			MaxSkew:           1,
+			TopologyKey:       "kubernetes.io/hostname",
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
 		},
 	}
 }

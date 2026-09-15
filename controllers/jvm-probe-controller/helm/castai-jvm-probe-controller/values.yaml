@@ -106,13 +106,8 @@ management:
   rollbackOnDisable: false
 
   # Operation mode (orthogonal to enabled):
-  #   apply     — controller mutates workloads.
-  #   recommend — controller observes and captures snapshots but does NOT
-  #               patch. This is the default so a fresh install captures
-  #               original workload state without mutating workloads;
-  #               operators must explicitly patch management.mode to apply
-  #               before the controller makes changes.
-  mode: recommend
+  #   apply — controller mutates workloads.
+  mode: apply
 
 # CRD chart control — set false only if you install CRDs out-of-band.
 # Defaults to false because install.sh installs CRDs as a separate release
@@ -162,9 +157,59 @@ affinity:
           topologyKey: kubernetes.io/hostname
 
 service:
-  enabled: false
+  enabled: true
   type: ClusterIP
-  port: 8080
+  port: 443
+  targetPort: 8443
+
+# Webhook server configuration
+webhook:
+  # Master switch for the pod-mutating admission webhook.
+  enabled: true
+  # Listen address inside the container.
+  addr: ":8443"
+  # admissionReviewTimeoutSeconds surfaced to the API server.
+  timeoutSeconds: 5
+  # failurePolicy: Ignore keeps Pod creation unblocked if the webhook is down.
+  # Set to Fail after operational confidence for strict enforcement.
+  failurePolicy: Ignore
+  # reinvocationPolicy controls whether the webhook is re-invoked after other
+  # mutating webhooks. Never is the safe default for our copy-style mutation.
+  reinvocationPolicy: Never
+  # Optional scope restrictions. Empty maps mean the webhook applies to all
+  # Pods cluster-wide (subject to RBAC of the api server invoking it).
+  namespaceSelector: {}
+  objectSelector: {}
+
+# cert-manager integration. When enabled, a Certificate resource is rendered
+# and the MutatingWebhookConfiguration uses the cert-manager CA injection
+# annotation. The referenced issuer must already exist in the cluster.
+certManager:
+  enabled: true
+  issuerRef:
+    # Name of the cert-manager Issuer / ClusterIssuer.
+    name: ""
+    kind: ClusterIssuer
+    # group is omitted by default (cert-manager.io is the default API group).
+    group: ""
+
+# Manual TLS fallback. Use this when the cluster does not have cert-manager.
+# The operator MUST create the referenced Secret with tls.crt and tls.key
+# before installing this chart; the chart does not render or manage the
+# Secret (this prevents Helm from overwriting operator-supplied certificate
+# data on `helm upgrade`). Example:
+#
+#   kubectl -n <release-namespace> create secret tls <tls.manualSecret.name> \
+#     --cert=tls.crt --key=tls.key
+#
+# If the Secret is missing or its tls.crt/tls.key are empty, webhook pods
+# will fail readiness and Pod mutations will not be served.
+tls:
+  manualSecret:
+    enabled: false
+    # Required when manualSecret.enabled is true. The Secret must already
+    # exist in the release namespace.
+    name: ""
 
 metrics:
   enabled: false
@@ -175,38 +220,6 @@ metrics:
 
 rbac:
   create: true
-
-# Rollback snapshot behavior — see docs/rollback-operator-runbook.md
-snapshot:
-  # If true, controller captures workload state to a JVMProbeOriginal CRD before
-  # patching. Required for rollback to work. Recommended: true in Prod.
-  enabled: true
-
-# Runtime behavior toggles — hot-reloaded via ConfigMap watch.
-management:
-  # Master switch. When false, controller stops making new patches. Existing
-  # patched workloads keep their patches unless rollbackOnDisable=true.
-  enabled: true
-
-  # Only meaningful when enabled=false. When true, flipping enabled from true
-  # to false triggers a one-shot rollback loop that restores every snapshotted
-  # workload. CRDs are kept post-rollback with status.conditions[RolledBack]=True.
-  rollbackOnDisable: false
-
-  # Operation mode (orthogonal to enabled):
-  #   apply     — controller mutates workloads.
-  #   recommend — controller observes and captures snapshots but does NOT
-  #               patch. This is the default so a fresh install captures
-  #               original workload state without mutating workloads;
-  #               operators must explicitly patch management.mode to apply
-  #               before the controller makes changes.
-  mode: recommend
-
-# CRD chart control — set false only if you install CRDs out-of-band.
-# Defaults to false because install.sh installs CRDs as a separate release
-# (castai-guardrails-crds) to avoid ownership conflicts between controllers.
-crds:
-  enabled: false
 
 # Pod disruption budget for the controller
 podDisruptionBudget:

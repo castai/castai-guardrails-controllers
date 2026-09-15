@@ -66,6 +66,19 @@ var micronautImagePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bgraalvm\b`),
 }
 
+// frameworkImagePatterns is the concatenation of all framework image
+// patterns, built once at package init so DetectJVMContainer does not
+// allocate a fresh backing slice on every call. Appended in a fixed
+// order so iteration results are deterministic.
+var frameworkImagePatterns = func() []*regexp.Regexp {
+	out := make([]*regexp.Regexp, 0,
+		len(springBootImagePatterns)+len(quarkusImagePatterns)+len(micronautImagePatterns))
+	out = append(out, springBootImagePatterns...)
+	out = append(out, quarkusImagePatterns...)
+	out = append(out, micronautImagePatterns...)
+	return out
+}()
+
 // envVarsIndicateJVM checks if environment variables strongly indicate a JVM container
 func envVarsIndicateJVM(env []corev1.EnvVar) bool {
 	for _, e := range env {
@@ -136,18 +149,38 @@ func DetectJVMContainer(container corev1.Container) ContainerInfo {
 	// PHASE 2: Image patterns with word boundaries (only if not already detected via env)
 	if !info.IsJVM {
 		imageLower := strings.ToLower(container.Image)
+
+		// Step 1: JVM runtime patterns (openjdk, java, jre, jdk, ...)
 		for _, re := range jvmImagePatterns {
 			if re.MatchString(imageLower) {
 				info.IsJVM = true
 				break
 			}
 		}
-		
-		// Check false-positive patterns (explicitly exclude unless env vars say JVM)
-		if !envVarsIndicateJVM(container.Env) {
+
+		// Step 2: Apply false-positive exclusion. Only clear the runtime
+		// detection here. Skipped when env vars strongly indicate JVM.
+		if info.IsJVM && !envVarsIndicateJVM(container.Env) {
 			for _, re := range nonJVMImagePatterns {
 				if re.MatchString(imageLower) {
 					info.IsJVM = false
+					break
+				}
+			}
+		}
+
+		// Step 3: Framework-specific images (spring-boot, quarkus,
+		// micronaut) are also JVM workloads even when they do not contain
+		// a runtime keyword. Runs AFTER the non-JVM exclusion so a keyword
+		// appearing in both lists cannot silently clear a framework match.
+		// This is the final positive signal that is not overridden by
+		// nonJVMImagePatterns. Iterates the package-level
+		// frameworkImagePatterns slice (built once at init) to avoid
+		// per-call allocation.
+		if !info.IsJVM {
+			for _, re := range frameworkImagePatterns {
+				if re.MatchString(imageLower) {
+					info.IsJVM = true
 					break
 				}
 			}
