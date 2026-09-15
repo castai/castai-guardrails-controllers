@@ -4,13 +4,111 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"time"
+
+	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 )
+
+// admissionMetrics holds the in-memory counters exposed by /metrics. The
+// counters are monotonic uint64s updated atomically so the /metrics
+// handler never blocks the request path. No external Prometheus client
+// is required — the endpoint returns plain text in a custom format.
+type admissionMetrics struct {
+	requests  atomic.Uint64
+	mutations atomic.Uint64
+	bypasses  atomic.Uint64
+	errors    atomic.Uint64
+}
+
+// Snapshot returns the current counter values in a consistent order. The
+// values are read individually; under high concurrency a counter read
+// here may not perfectly match the count read a microsecond later from
+// another counter. This is acceptable for an observability endpoint.
+func (m *admissionMetrics) snapshot() (requests, mutations, bypasses, errs uint64) {
+	return m.requests.Load(), m.mutations.Load(), m.bypasses.Load(), m.errors.Load()
+}
+
+// WriteText renders the counters in Prometheus-like plain text format.
+// The format is intentionally trivial so operators can scrape it with
+// curl or any metrics scraper without depending on a Prometheus client.
+func (m *admissionMetrics) WriteText(w http.ResponseWriter) {
+	requests, mutations, bypasses, errs := m.snapshot()
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "jvm_probe_admission_requests_total %d\n", requests)
+	fmt.Fprintf(w, "jvm_probe_mutations_total %d\n", mutations)
+	fmt.Fprintf(w, "jvm_probe_bypasses_total %d\n", bypasses)
+	fmt.Fprintf(w, "jvm_probe_errors_total %d\n", errs)
+}
+
+// instrument wraps mutateHandler so each call increments the appropriate
+// counter. Classification is best-effort: a malformed body bumps errors;
+// a body with the bypass annotation bumps bypasses; otherwise the
+// response is inspected and a non-empty Patch bumps mutations.
+//
+// The wrapper buffers the response from the inner handler so it can both
+// forward the bytes to the client and read them back for classification.
+func (m *admissionMetrics) instrument(mutateHandler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		m.requests.Add(1)
+
+		// Buffer the body so we can classify and then re-deliver it to
+		// the inner handler untouched.
+		bodyBytes, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+		isError := false
+		isBypass := false
+		review := &admissionv1.AdmissionReview{}
+		if err := json.Unmarshal(bodyBytes, review); err != nil ||
+			review.Request == nil ||
+			len(review.Request.Object.Raw) == 0 {
+			isError = true
+		} else {
+			pod := &corev1.Pod{}
+			if json.Unmarshal(review.Request.Object.Raw, pod) == nil &&
+				IsBypassAnnotation(pod.Annotations) {
+				isBypass = true
+			}
+		}
+
+		rec := httptest.NewRecorder()
+		mutateHandler(rec, r)
+		for k, vv := range rec.Header() {
+			for _, v := range vv {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(rec.Code)
+		_, _ = w.Write(rec.Body.Bytes())
+
+		switch {
+		case isError:
+			m.errors.Add(1)
+		case isBypass:
+			m.bypasses.Add(1)
+		default:
+			resp := &admissionv1.AdmissionReview{}
+			if json.Unmarshal(rec.Body.Bytes(), resp) == nil &&
+				resp.Response != nil &&
+				len(resp.Response.Patch) > 0 {
+				m.mutations.Add(1)
+			}
+		}
+	}
+}
 
 // webhookShutdownTimeout bounds how long Start waits for in-flight requests
 // to complete when the parent context is canceled.
@@ -29,6 +127,7 @@ type WebhookServer struct {
 	keyFile  string
 	mux      *http.ServeMux
 	server   *http.Server
+	metrics  *admissionMetrics
 
 	listener net.Listener
 	ready    chan struct{}
@@ -36,21 +135,31 @@ type WebhookServer struct {
 
 // NewWebhookServer builds a WebhookServer bound to addr. addr may include a
 // port of ":0" (or "127.0.0.1:0") for tests that need an ephemeral port.
-// mutateHandler is wired to /mutate/pods; /healthz is always served and
-// returns 200 OK.
+// mutateHandler is wired to /mutate/pods; /healthz and /metrics are
+// always served and return 200 OK.
 func NewWebhookServer(addr, certFile, keyFile string, mutateHandler http.HandlerFunc) *WebhookServer {
+	metrics := &admissionMetrics{}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mutate/pods", mutateHandler)
+	mux.HandleFunc("/mutate/pods", metrics.instrument(mutateHandler))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) { metrics.WriteText(w) })
 	return &WebhookServer{
 		addr:     addr,
 		certFile: certFile,
 		keyFile:  keyFile,
 		mux:      mux,
+		metrics:  metrics,
 		ready:    make(chan struct{}),
 	}
+}
+
+// Metrics exposes the live counters for tests and operators that need
+// direct access (e.g., readiness probes). The returned struct shares
+// state with the /metrics endpoint.
+func (s *WebhookServer) Metrics() *admissionMetrics {
+	return s.metrics
 }
 
 // Start binds the listener and serves until ctx is canceled or the server
