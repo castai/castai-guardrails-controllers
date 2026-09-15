@@ -66,6 +66,19 @@ var micronautImagePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bgraalvm\b`),
 }
 
+// frameworkImagePatterns is the concatenation of all framework image
+// patterns, built once at package init so DetectJVMContainer does not
+// allocate a fresh backing slice on every call. Appended in a fixed
+// order so iteration results are deterministic.
+var frameworkImagePatterns = func() []*regexp.Regexp {
+	out := make([]*regexp.Regexp, 0,
+		len(springBootImagePatterns)+len(quarkusImagePatterns)+len(micronautImagePatterns))
+	out = append(out, springBootImagePatterns...)
+	out = append(out, quarkusImagePatterns...)
+	out = append(out, micronautImagePatterns...)
+	return out
+}()
+
 // envVarsIndicateJVM checks if environment variables strongly indicate a JVM container
 func envVarsIndicateJVM(env []corev1.EnvVar) bool {
 	for _, e := range env {
@@ -146,15 +159,11 @@ func DetectJVMContainer(container corev1.Container) ContainerInfo {
 		}
 
 		// Framework-specific images (spring-boot, quarkus, micronaut) are
-		// also JVM workloads even when they do not contain a runtime keyword.
+		// also JVM workloads even when they do not contain a runtime
+		// keyword. Iterate over the package-level frameworkImagePatterns
+		// slice (built once at init) instead of allocating per call.
 		if !info.IsJVM {
-			frameworkPatterns := make([]*regexp.Regexp, 0,
-				len(springBootImagePatterns)+len(quarkusImagePatterns)+len(micronautImagePatterns))
-			frameworkPatterns = append(frameworkPatterns, springBootImagePatterns...)
-			frameworkPatterns = append(frameworkPatterns, quarkusImagePatterns...)
-			frameworkPatterns = append(frameworkPatterns, micronautImagePatterns...)
-
-			for _, re := range frameworkPatterns {
+			for _, re := range frameworkImagePatterns {
 				if re.MatchString(imageLower) {
 					info.IsJVM = true
 					break

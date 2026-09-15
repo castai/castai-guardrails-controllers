@@ -89,11 +89,9 @@ func DefaultJVMConfig() JVMConfig {
 		InjectReadinessProbe:   true,
 		InjectStartupProbe:     true,
 		LogIntendedChanges:     true,
-		// PR3 defaults
+		// Canonical state defaults
 		ManagementEnabled:      true,
-		RollbackOnDisable:      false,
 		Mode:                   ModeApply,
-		SnapshotEnabled:        true,
 		OperatorNamespace:      "castai-agent",
 		Version:                "dev",
 	}

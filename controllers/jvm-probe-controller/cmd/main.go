@@ -148,9 +148,9 @@ func handleConfigMapUpdate(cm *corev1.ConfigMap) {
 		exclusionRules = rules
 	}
 
-	logInfo("configmap", "ConfigMap updated: logInterval=%s, reconcileInterval=%s mgmt=%v rollback=%v mode=%s",
+	logInfo("configmap", "ConfigMap updated: logInterval=%s, reconcileInterval=%s mgmt=%v mode=%s",
 		newConfig.LogInterval, newConfig.ReconcileInterval,
-		newConfig.ManagementEnabled, newConfig.RollbackOnDisable, newConfig.Mode)
+		newConfig.ManagementEnabled, newConfig.Mode)
 
 	// oldState is captured above so a future rollback path can compare
 	// against the previous values; kept as a hook for the TSC rollback
@@ -253,9 +253,9 @@ func main() {
 		if newConfig.Exclusions != "" {
 			exclusionRules = parseExclusionRules(newConfig.Exclusions)
 		}
-		logAlways("Loaded configuration from ConfigMap %s/%s (mgmt=%v rollback=%v mode=%s ns=%s)",
+		logAlways("Loaded configuration from ConfigMap %s/%s (mgmt=%v mode=%s ns=%s)",
 			configNamespace, ConfigMapName,
-			newConfig.ManagementEnabled, newConfig.RollbackOnDisable, newConfig.Mode,
+			newConfig.ManagementEnabled, newConfig.Mode,
 			newConfig.OperatorNamespace)
 	} else {
 		logAlways("ConfigMap not found, using defaults")
