@@ -118,13 +118,6 @@ func NewController(clientset *kubernetes.Clientset, factory informers.SharedInfo
 
 // handleConfigMapUpdate handles ConfigMap updates for hot-reload.
 func handleConfigMapUpdate(cm *corev1.ConfigMap) {
-	configLock.Lock()
-	var oldState RollbackState
-	if config != nil {
-		oldState = config.StateOf()
-	}
-	configLock.Unlock()
-
 	envVersion := os.Getenv("OPERATOR_VERSION")
 	newConfig, parseErrs := ParseJVMConfig(cm, envVersion)
 	for _, e := range parseErrs {
@@ -151,11 +144,6 @@ func handleConfigMapUpdate(cm *corev1.ConfigMap) {
 	logInfo("configmap", "ConfigMap updated: logInterval=%s, reconcileInterval=%s mgmt=%v mode=%s",
 		newConfig.LogInterval, newConfig.ReconcileInterval,
 		newConfig.ManagementEnabled, newConfig.Mode)
-
-	// oldState is captured above so a future rollback path can compare
-	// against the previous values; kept as a hook for the TSC rollback
-	// migration that runs in the tsc-controller.
-	_ = oldState
 }
 
 // parseExclusionRules parses exclusion rules from ConfigMap

@@ -150,7 +150,7 @@ func DetectJVMContainer(container corev1.Container) ContainerInfo {
 	if !info.IsJVM {
 		imageLower := strings.ToLower(container.Image)
 
-		// JVM runtime patterns (openjdk, java, jre, jdk, ...)
+		// Step 1: JVM runtime patterns (openjdk, java, jre, jdk, ...)
 		for _, re := range jvmImagePatterns {
 			if re.MatchString(imageLower) {
 				info.IsJVM = true
@@ -158,24 +158,29 @@ func DetectJVMContainer(container corev1.Container) ContainerInfo {
 			}
 		}
 
-		// Framework-specific images (spring-boot, quarkus, micronaut) are
-		// also JVM workloads even when they do not contain a runtime
-		// keyword. Iterate over the package-level frameworkImagePatterns
-		// slice (built once at init) instead of allocating per call.
-		if !info.IsJVM {
-			for _, re := range frameworkImagePatterns {
+		// Step 2: Apply false-positive exclusion. Only clear the runtime
+		// detection here. Skipped when env vars strongly indicate JVM.
+		if info.IsJVM && !envVarsIndicateJVM(container.Env) {
+			for _, re := range nonJVMImagePatterns {
 				if re.MatchString(imageLower) {
-					info.IsJVM = true
+					info.IsJVM = false
 					break
 				}
 			}
 		}
 
-		// Check false-positive patterns (explicitly exclude unless env vars say JVM)
-		if !envVarsIndicateJVM(container.Env) {
-			for _, re := range nonJVMImagePatterns {
+		// Step 3: Framework-specific images (spring-boot, quarkus,
+		// micronaut) are also JVM workloads even when they do not contain
+		// a runtime keyword. Runs AFTER the non-JVM exclusion so a keyword
+		// appearing in both lists cannot silently clear a framework match.
+		// This is the final positive signal that is not overridden by
+		// nonJVMImagePatterns. Iterates the package-level
+		// frameworkImagePatterns slice (built once at init) to avoid
+		// per-call allocation.
+		if !info.IsJVM {
+			for _, re := range frameworkImagePatterns {
 				if re.MatchString(imageLower) {
-					info.IsJVM = false
+					info.IsJVM = true
 					break
 				}
 			}
