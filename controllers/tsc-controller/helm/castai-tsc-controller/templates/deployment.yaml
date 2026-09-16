@@ -51,11 +51,41 @@ spec:
         - name: controller
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.webhook.enabled }}
+          ports:
+            - name: webhook
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          {{- end }}
           args:
             - -config-namespace={{ .Release.Namespace }}
+            {{- if .Values.webhook.enabled }}
+            - --webhook-addr={{ .Values.webhook.addr }}
+            - --tls-cert-file=/etc/webhook/certs/tls.crt
+            - --tls-key-file=/etc/webhook/certs/tls.key
+            {{- end }}
+          {{- if .Values.webhook.enabled }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.targetPort }}
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.targetPort }}
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- end }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-                    # livenessProbe and readinessProbe not supported by TSC controller
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           env:
@@ -63,8 +93,21 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: ENABLE_TSC_MANAGEMENT
-              value: "{{ .Values.config.enableTSCManagement }}"
+            - name: OPERATOR_VERSION
+              value: "{{ .Values.image.tag | default .Chart.AppVersion }}"
+          {{- if .Values.webhook.enabled }}
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
+              readOnly: true
+          {{- end }}
+      {{- if .Values.webhook.enabled }}
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: {{ include "castai-tsc-controller.webhookTLSSecretName" . }}
+            defaultMode: 0400
+      {{- end }}
       {{- if .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml .Values.nodeSelector | nindent 8 }}

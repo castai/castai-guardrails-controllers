@@ -87,3 +87,16 @@ Generate constraints JSON
 [{"maxSkew": {{ $c.maxSkew }}, "topologyKey": "{{ $c.topologyKey }}", "whenUnsatisfiable": "{{ $c.whenUnsatisfiable }}"}]
 {{- end }}
 {{- end }}
+
+{{/*
+Resolve the Secret name that holds the webhook TLS cert + key.
+When tls.manualSecret.enabled is true, the operator-supplied name is used.
+Otherwise (cert-manager or default), the convention is `<fullname>-tls`.
+*/}}
+{{- define "castai-tsc-controller.webhookTLSSecretName" -}}
+{{- if .Values.tls.manualSecret.enabled -}}
+{{- .Values.tls.manualSecret.name -}}
+{{- else -}}
+{{- include "castai-tsc-controller.fullname" . -}}-tls
+{{- end -}}
+{{- end }}

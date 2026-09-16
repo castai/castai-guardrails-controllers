@@ -18,11 +18,21 @@ metadata:
   labels:
     {{- include "castai-tsc-controller.labels" . | nindent 4 }}
 rules:
+  # Read-only access to Deployments/StatefulSets/ReplicaSets is retained for
+  # owner-reference lookups (webhook admission path) and rollback of legacy
+  # workloads that were patched by the previous controller version.
+  # The "patch" verb is retained on Deployments/StatefulSets so the
+  # rollback path (applyInversePatch, removeTSCFromWorkload) and the
+  # startup managed-annotation reconciler (reconcileOneManagedWorkload)
+  # can continue to undo legacy patches.
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch", "patch"]
   - apiGroups: ["apps"]
     resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["configmaps"]

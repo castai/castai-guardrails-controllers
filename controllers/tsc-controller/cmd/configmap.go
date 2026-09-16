@@ -42,6 +42,13 @@ type TSCConfig struct {
 	SnapshotEnabled   bool   `json:"snapshotEnabled"`   // capture before patching
 	OperatorNamespace string `json:"operatorNamespace"` // namespace where TSCOriginal CRs live
 	Version           string `json:"version"`           // build/operator version (informational)
+	// SkipSingleReplica is read from the ConfigMap (key "skipSingleReplica")
+	// and consulted by the Pod admission webhook. When true, Pods whose
+	// owner workload reports fewer than 2 replicas are not mutated. The
+	// Helm chart default is true; the legacy behaviour skipped
+	// `replicas < 2` workloads in the informer loop, and the migration
+	// preserves that contract.
+	SkipSingleReplica bool `json:"skipSingleReplica"`
 }
 
 // RollbackState is the immutable view of TSCConfig used to detect transitions.
@@ -91,6 +98,10 @@ func ParseTSCConfig(cm *corev1.ConfigMap, envVersion string) (*TSCConfig, []erro
 		SnapshotEnabled:   true,
 		OperatorNamespace: "castai-agent",
 		Version:           envVersion,
+		// Default to skipping single-replica workloads to preserve the
+		// legacy informer-loop behaviour. The Helm chart renders the same
+		// default into the ConfigMap so operator installs are unchanged.
+		SkipSingleReplica: true,
 	}
 	if envVersion == "" {
 		cfg.Version = "dev"
@@ -161,6 +172,9 @@ func ParseTSCConfig(cm *corev1.ConfigMap, envVersion string) (*TSCConfig, []erro
 	}
 	if v, ok := data["operatorNamespace"]; ok && v != "" {
 		cfg.OperatorNamespace = v
+	}
+	if v, ok := data["skipSingleReplica"]; ok && v != "" {
+		cfg.SkipSingleReplica = parseBool(v, true)
 	}
 
 	// Deprecated keys — backward compatibility mapping.

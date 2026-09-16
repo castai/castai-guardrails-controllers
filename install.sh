@@ -46,6 +46,17 @@ INSTALL_PDB="${INSTALL_PDB:-}"
 # webhook.failurePolicy, certManager.enabled, ...) rather than a runtime mode.
 TSC_MODE="${TSC_MODE:-recommend}"
 TSC_IMAGE_TAG_OVERRIDE="${TSC_IMAGE_TAG:-}"
+# TSC is a Pod-mutating admission webhook (chunk 4 of the migration plan).
+# Defaults align with values.yaml: webhook on, cert-manager on with an empty
+# issuerRef (operator must override), manual TLS off. Operators can disable
+# cert-manager and/or enable manual TLS via env vars.
+TSC_WEBHOOK_ENABLED="${TSC_WEBHOOK_ENABLED:-true}"
+TSC_WEBHOOK_FAILURE_POLICY="${TSC_WEBHOOK_FAILURE_POLICY:-Ignore}"
+TSC_CERT_MANAGER_ENABLED="${TSC_CERT_MANAGER_ENABLED:-true}"
+TSC_CERT_MANAGER_ISSUER_REF_NAME="${TSC_CERT_MANAGER_ISSUER_REF_NAME:-}"
+TSC_CERT_MANAGER_ISSUER_REF_KIND="${TSC_CERT_MANAGER_ISSUER_REF_KIND:-ClusterIssuer}"
+TSC_MANUAL_TLS_ENABLED="${TSC_MANUAL_TLS_ENABLED:-false}"
+TSC_MANUAL_TLS_SECRET_NAME="${TSC_MANUAL_TLS_SECRET_NAME:-}"
 JVM_IMAGE_TAG_OVERRIDE="${JVM_IMAGE_TAG:-}"
 PDB_IMAGE_TAG_OVERRIDE="${PDB_IMAGE_TAG:-}"
 
@@ -161,6 +172,12 @@ log_install_failure() {
     echo "INSTALL_JVM=${INSTALL_JVM:-false}"
     echo "INSTALL_PDB=${INSTALL_PDB:-false}"
     [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_MODE=${TSC_MODE}"
+    [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_WEBHOOK_ENABLED=${TSC_WEBHOOK_ENABLED}"
+    [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_WEBHOOK_FAILURE_POLICY=${TSC_WEBHOOK_FAILURE_POLICY}"
+    [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_CERT_MANAGER_ENABLED=${TSC_CERT_MANAGER_ENABLED}"
+    [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_CERT_MANAGER_ISSUER_REF_NAME=${TSC_CERT_MANAGER_ISSUER_REF_NAME}"
+    [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_MANUAL_TLS_ENABLED=${TSC_MANUAL_TLS_ENABLED}"
+    [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_MANUAL_TLS_SECRET_NAME=${TSC_MANUAL_TLS_SECRET_NAME}"
     echo ""
     echo "--- Helm command ---"
     printf 'helm'
@@ -494,7 +511,7 @@ if [ "$IS_INTERACTIVE" = true ]; then
   echo "============================================================"
   echo "  Namespace : ${NAMESPACE}"
   echo "  Cluster   : ${CLUSTER_NAME}"
-  [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_IMAGE_TAG_OVERRIDE:-$TSC_TAG_DEFAULT}  mode=${TSC_MODE}"
+  [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_IMAGE_TAG_OVERRIDE:-$TSC_TAG_DEFAULT}  mode=${TSC_MODE}  webhook=${TSC_WEBHOOK_ENABLED}  cert-manager=${TSC_CERT_MANAGER_ENABLED}  manualTLS=${TSC_MANUAL_TLS_ENABLED}"
   [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-$JVM_TAG_DEFAULT}  (webhook, apply)"
   [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_IMAGE_TAG_OVERRIDE:-$PDB_TAG_DEFAULT}  FixPoorPDBs=true (live)"
   echo ""
@@ -604,7 +621,15 @@ install_chart() {
       args+=(--set management.rollbackOnDisable=false)
       # CRDs are installed as a standalone release (castai-guardrails-crds) by
       # install.sh to avoid ownership conflicts between controllers.
-      args+=(--set crds.enabled=false) ;;
+      args+=(--set crds.enabled=false)
+      # Webhook / TLS plumbing for the Pod-mutating admission webhook.
+      args+=(--set webhook.enabled="$TSC_WEBHOOK_ENABLED")
+      args+=(--set webhook.failurePolicy="$TSC_WEBHOOK_FAILURE_POLICY")
+      args+=(--set certManager.enabled="$TSC_CERT_MANAGER_ENABLED")
+      args+=(--set certManager.issuerRef.name="$TSC_CERT_MANAGER_ISSUER_REF_NAME")
+      args+=(--set certManager.issuerRef.kind="$TSC_CERT_MANAGER_ISSUER_REF_KIND")
+      args+=(--set tls.manualSecret.enabled="$TSC_MANUAL_TLS_ENABLED")
+      args+=(--set tls.manualSecret.name="$TSC_MANUAL_TLS_SECRET_NAME") ;;
     JVM)
       # CRDs are installed as a standalone release (castai-guardrails-crds) by
       # install.sh to avoid ownership conflicts between controllers.

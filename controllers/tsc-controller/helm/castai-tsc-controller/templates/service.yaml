@@ -1,0 +1,20 @@
+{{- if and .Values.webhook.enabled .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "castai-tsc-controller.fullname" . }}
+  namespace: {{ .Release.Namespace | default "castai-agent" }}
+  labels:
+    {{- include "castai-tsc-controller.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: https
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+  selector:
+    {{- include "castai-tsc-controller.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+{{- end }}
