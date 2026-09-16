@@ -1,0 +1,50 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "castai-tsc-controller.fullname" . }}
+  labels:
+    {{- include "castai-tsc-controller.labels" . | nindent 4 }}
+  {{- if and .Values.certManager.enabled .Values.certManager.issuerRef.name (not .Values.tls.manualSecret.enabled) }}
+  # cert-manager injects the CA bundle into this annotation target.
+  # The value must reference the Certificate resource (not the Secret it
+  # produces); see certificate.yaml for the matching resource name.
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace | default "castai-agent" }}/{{ include "castai-tsc-controller.fullname" . }}
+  {{- end }}
+webhooks:
+  - name: mutate-pods.{{ include "castai-tsc-controller.fullname" . }}.svc
+    sideEffects: None
+    admissionReviewVersions:
+      - v1
+    reinvocationPolicy: {{ .Values.webhook.reinvocationPolicy }}
+    failurePolicy: {{ .Values.webhook.failurePolicy }}
+    timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+    namespaceSelector:
+      {{- toYaml .Values.webhook.namespaceSelector | nindent 6 }}
+    objectSelector:
+      {{- toYaml .Values.webhook.objectSelector | nindent 6 }}
+    rules:
+      - operations:
+          - CREATE
+        apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        resources:
+          - pods
+    clientConfig:
+      service:
+        name: {{ include "castai-tsc-controller.fullname" . }}
+        namespace: {{ .Release.Namespace | default "castai-agent" }}
+        path: /mutate/pods
+        port: {{ .Values.service.port }}
+      {{- if .Values.webhook.caBundle }}
+      caBundle: {{ .Values.webhook.caBundle }}
+      {{- else }}
+      # Empty placeholder; populated at install time by:
+      #   - cert-manager (when certManager.enabled=true and issuerRef.name is set), or
+      #   - the operator (via webhook.caBundle when tls.manualSecret.enabled=true).
+      caBundle: Cg==
+      {{- end }}
+{{- end }}

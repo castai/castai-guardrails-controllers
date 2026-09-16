@@ -6,7 +6,7 @@ replicaCount: 2
 image:
   # GCP Artifact Registry (castai-hub). Use imagePullSecrets on the pod if required for your cluster.
   repository: us-docker.pkg.dev/castai-hub/library/castai-tsc-controller
-  tag: "0.0.2"
+  tag: "0.1.0"
   # Container image pull policy
   pullPolicy: IfNotPresent
 
@@ -103,9 +103,72 @@ affinity:
           topologyKey: kubernetes.io/hostname
 
 service:
-  enabled: false
+  enabled: true
   type: ClusterIP
-  port: 8080
+  port: 443
+  targetPort: 8443
+
+# Webhook server configuration
+webhook:
+  # Master switch for the pod-mutating admission webhook.
+  enabled: true
+  # Listen address inside the container.
+  addr: ":8443"
+  # admissionReviewTimeoutSeconds surfaced to the API server.
+  timeoutSeconds: 5
+  # failurePolicy: Ignore keeps Pod creation unblocked if the webhook is down.
+  # Set to Fail after operational confidence for strict enforcement.
+  failurePolicy: Ignore
+  # reinvocationPolicy controls whether the webhook is re-invoked after other
+  # mutating webhooks. Never is the safe default for our copy-style mutation.
+  reinvocationPolicy: Never
+  # Optional scope restrictions. Empty maps mean the webhook applies to all
+  # Pods cluster-wide (subject to RBAC of the api server invoking it).
+  namespaceSelector: {}
+  objectSelector: {}
+  # Manual CA bundle override. When empty, the chart expects cert-manager to
+  # inject the CA bundle via the cert-manager.io/inject-ca-from annotation.
+  # Set this when tls.manualSecret.enabled=true so the API server trusts the
+  # certificate supplied via the operator-managed Secret.
+  caBundle: ""
+
+# cert-manager integration. When enabled, a Certificate resource is rendered
+# and the MutatingWebhookConfiguration uses the cert-manager CA injection
+# annotation. The referenced issuer must already exist in the cluster.
+#
+# IMPORTANT: defaults to false so the chart renders a webhook that requires
+# an explicit opt-in. To enable cert-manager-managed certificates, set both
+# certManager.enabled=true and certManager.issuerRef.name=<your-issuer>.
+# Alternatively, set tls.manualSecret.enabled=true and tls.manualSecret.name
+# to point at an operator-managed Secret with tls.crt/tls.key. Without one
+# of these two paths the MutatingWebhookConfiguration will have an empty
+# caBundle and the API server will not trust the webhook.
+certManager:
+  enabled: false
+  issuerRef:
+    # Name of the cert-manager Issuer / ClusterIssuer.
+    name: ""
+    kind: ClusterIssuer
+    # group is omitted by default (cert-manager.io is the default API group).
+    group: ""
+
+# Manual TLS fallback. Use this when the cluster does not have cert-manager.
+# The operator MUST create the referenced Secret with tls.crt and tls.key
+# before installing this chart; the chart does not render or manage the
+# Secret (this prevents Helm from overwriting operator-supplied certificate
+# data on `helm upgrade`). Example:
+#
+#   kubectl -n <release-namespace> create secret tls <tls.manualSecret.name> \
+#     --cert=tls.crt --key=tls.key
+#
+# If the Secret is missing or its tls.crt/tls.key are empty, webhook pods
+# will fail readiness and Pod mutations will not be served.
+tls:
+  manualSecret:
+    enabled: false
+    # Required when manualSecret.enabled is true. The Secret must already
+    # exist in the release namespace.
+    name: ""
 
 metrics:
   enabled: false

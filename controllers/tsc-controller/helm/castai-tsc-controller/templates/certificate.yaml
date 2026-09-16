@@ -1,0 +1,33 @@
+{{- if and .Values.webhook.enabled .Values.certManager.enabled }}
+{{- if .Values.certManager.issuerRef.name }}
+{{- if not .Values.tls.manualSecret.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "castai-tsc-controller.fullname" . }}
+  namespace: {{ .Release.Namespace | default "castai-agent" }}
+  labels:
+    {{- include "castai-tsc-controller.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "castai-tsc-controller.webhookTLSSecretName" . }}
+  duration: 8760h
+  renewBefore: 720h
+  commonName: {{ include "castai-tsc-controller.fullname" . }}.{{ .Release.Namespace | default "castai-agent" }}.svc
+  dnsNames:
+    - {{ include "castai-tsc-controller.fullname" . }}
+    - {{ include "castai-tsc-controller.fullname" . }}.{{ .Release.Namespace | default "castai-agent" }}.svc
+    - {{ include "castai-tsc-controller.fullname" . }}.{{ .Release.Namespace | default "castai-agent" }}.svc.cluster.local
+  issuerRef:
+    name: {{ .Values.certManager.issuerRef.name }}
+    kind: {{ .Values.certManager.issuerRef.kind }}
+    {{- if .Values.certManager.issuerRef.group }}
+    group: {{ .Values.certManager.issuerRef.group }}
+    {{- end }}
+{{- end }}
+{{- else }}
+{{- /* certManager.enabled=true but issuerRef.name is empty: skip Certificate.
+       The MutatingWebhookConfiguration CA bundle must be supplied via a
+       Secret of the same name (typically the manualSecret path) or the
+       operator must set certManager.issuerRef.name. */}}
+{{- end }}
+{{- end }}

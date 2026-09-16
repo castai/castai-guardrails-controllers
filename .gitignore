@@ -6,3 +6,8 @@ mise.toml
 
 # Kimchi harness metadata (plans, notes, session state)
 .kimchi/
+
+# Controller build artifacts
+controllers/*/tsc-controller
+controllers/*/jvm-probe-controller
+controllers/*/pdb-controller
