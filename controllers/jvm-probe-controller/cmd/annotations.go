@@ -24,9 +24,9 @@ const (
 	AnnotationFailureCountThreshold = AnnotationPrefix + "failure-log-threshold"
 
 	// P1: Probe injection control annotations
-	AnnotationJVMInjectLiveness   = AnnotationPrefix + "inject-liveness"
-	AnnotationJVMInjectReadiness  = AnnotationPrefix + "inject-readiness"
-	AnnotationJVMInjectStartup    = AnnotationPrefix + "inject-startup"
+	AnnotationJVMInjectLiveness  = AnnotationPrefix + "inject-liveness"
+	AnnotationJVMInjectReadiness = AnnotationPrefix + "inject-readiness"
+	AnnotationJVMInjectStartup   = AnnotationPrefix + "inject-startup"
 
 	// Chunk 2: Pod-mutation-only annotations.
 	// AnnotationJVMProbeStartupPeriod overrides periodSeconds for the
@@ -40,6 +40,11 @@ const (
 	// AnnotationJVMProbeClearDelays removes initialDelaySeconds from the
 	// existing liveness/readiness probes when set to a truthy value.
 	AnnotationJVMProbeClearDelays = AnnotationPrefix + "clear-delays"
+
+	// AnnotationJVMProbeAlign opts the Pod in to automatic probe alignment
+	// for the lifetime of this Pod. It overrides the config-level
+	// AlignProbes default on a per-Pod basis.
+	AnnotationJVMProbeAlign = AnnotationPrefix + "align"
 )
 
 // ShouldOverwriteAll checks if all probes should be overwritten
@@ -127,4 +132,15 @@ func ShouldInjectStartup(annotations map[string]string, configDefault bool) bool
 func ShouldClearDelays(annotations map[string]string) bool {
 	val, ok := annotations[AnnotationJVMProbeClearDelays]
 	return ok && (val == "true" || val == "yes" || val == "1")
+}
+
+// ShouldAlignProbes reports whether automatic probe alignment is enabled for
+// this Pod. The Pod annotation overrides the config-level default. Any
+// truthy value (true/yes/1) enables alignment; any other value disables it.
+func ShouldAlignProbes(annotations map[string]string, configDefault bool) bool {
+	val, ok := annotations[AnnotationJVMProbeAlign]
+	if !ok {
+		return configDefault
+	}
+	return val == "true" || val == "yes" || val == "1"
 }

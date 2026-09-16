@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 
@@ -37,8 +38,8 @@ type jsonPatchOp struct {
 // mutationApplied gates the managed-annotation patch and the decision to
 // attach a non-empty Patch field to the AdmissionResponse.
 type podMutationResult struct {
-	patches          []jsonPatchOp
-	mutationApplied  bool
+	patches         []jsonPatchOp
+	mutationApplied bool
 }
 
 // mutatePod is the entry point invoked from the HTTP handler. It decodes the
@@ -295,6 +296,35 @@ func buildContainerPatches(
 		})
 	}
 
+	// Step 4: probe alignment. Only run when a startup probe was injected
+	// or regenerated for this container in this call. haveStartup reflects
+	// "probe is already present after honouring overwriteStartup", so
+	// !haveStartup && startupSrc != nil covers both first-time injection
+	// and overwrite-driven regeneration. Alignment strips
+	// initialDelaySeconds and extends failureThreshold so the liveness and
+	// readiness probes cover at least MinProbeWindowSeconds of observation
+	// time. The alignment is applied to the final probe state — existing
+	// or framework-regenerated — to keep both code paths consistent.
+	if !haveStartup && startupSrc != nil && cfg != nil && ShouldAlignProbes(annotations, cfg.AlignProbes) {
+		if workingLiveness != nil {
+			// Deep-copy so alignProbe cannot re-emit a remove patch for
+			// initialDelaySeconds when clear-delays has already scheduled
+			// one for the same field (RFC 6902 forbids duplicate removes).
+			livenessCopy := workingLiveness.DeepCopy()
+			if clearDelays && container.LivenessProbe != nil {
+				livenessCopy.InitialDelaySeconds = 0
+			}
+			patches = append(patches, alignProbe(basePath+"/livenessProbe", livenessCopy, cfg.MinProbeWindowSeconds, cfg.MaxFailureThreshold)...)
+		}
+		if workingReadiness != nil {
+			readinessCopy := workingReadiness.DeepCopy()
+			if clearDelays && container.ReadinessProbe != nil {
+				readinessCopy.InitialDelaySeconds = 0
+			}
+			patches = append(patches, alignProbe(basePath+"/readinessProbe", readinessCopy, cfg.MinProbeWindowSeconds, cfg.MaxFailureThreshold)...)
+		}
+	}
+
 	return patches, nil
 }
 
@@ -311,6 +341,45 @@ func tuneStartupProbe(p *corev1.Probe, periodSeconds, failureThreshold int32) *c
 	p.FailureThreshold = failureThreshold
 	p.SuccessThreshold = startupProbeSuccessThresholdValue
 	return p
+}
+
+// alignProbe emits the JSON Patch operations that align a single
+// liveness/readiness probe with the controller's window policy. Alignment:
+//
+//  1. Strips initialDelaySeconds when present so the startup probe gates
+//     startup cleanly.
+//  2. Extends failureThreshold so periodSeconds * failureThreshold is at
+//     least minWindow seconds, capped at maxFailure.
+//
+// The function does not modify the probe; it returns patch operations that
+// the caller appends to the result. When the probe is nil or the window is
+// already met, it returns nil so no spurious patches are emitted.
+func alignProbe(path string, probe *corev1.Probe, minWindow, maxFailure int32) []jsonPatchOp {
+	if probe == nil {
+		return nil
+	}
+	var ops []jsonPatchOp
+	if probe.InitialDelaySeconds > 0 {
+		ops = append(ops, removeField(path+"/initialDelaySeconds"))
+	}
+	if probe.PeriodSeconds > 0 && int32(probe.PeriodSeconds)*probe.FailureThreshold < minWindow {
+		needed := int32(math.Ceil(float64(minWindow) / float64(probe.PeriodSeconds)))
+		newFailure := probe.FailureThreshold
+		if needed > newFailure {
+			newFailure = needed
+		}
+		if newFailure > maxFailure {
+			newFailure = maxFailure
+		}
+		if newFailure != probe.FailureThreshold {
+			ops = append(ops, jsonPatchOp{
+				Op:    "replace",
+				Path:  path + "/failureThreshold",
+				Value: newFailure,
+			})
+		}
+	}
+	return ops
 }
 
 // buildStartupFromFramework is the framework-based fallback for the startup

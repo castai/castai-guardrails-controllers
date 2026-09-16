@@ -16,7 +16,36 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	jsonpatch "github.com/evanphx/json-patch"
 )
+
+// applyPatches applies the given patch set to a copy of pod and returns the
+// mutated Pod. Used by tests that need to observe the post-patch state.
+func applyPatches(t *testing.T, pod *corev1.Pod, patches []jsonPatchOp) *corev1.Pod {
+	t.Helper()
+	originalJSON, err := json.Marshal(pod)
+	if err != nil {
+		t.Fatalf("marshal pod: %v", err)
+	}
+	patchesJSON, err := json.Marshal(patches)
+	if err != nil {
+		t.Fatalf("marshal patches: %v", err)
+	}
+	patchSet, err := jsonpatch.DecodePatch(patchesJSON)
+	if err != nil {
+		t.Fatalf("decode patches: %v", err)
+	}
+	mutatedJSON, err := patchSet.Apply(originalJSON)
+	if err != nil {
+		t.Fatalf("apply patches: %v", err)
+	}
+	out := &corev1.Pod{}
+	if err := json.Unmarshal(mutatedJSON, out); err != nil {
+		t.Fatalf("unmarshal mutated pod: %v", err)
+	}
+	return out
+}
 
 // jvmContainer returns a container whose image clearly identifies it as a
 // JVM workload. The default framework is detected as "spring-boot" because
@@ -957,6 +986,262 @@ func TestHandlePodAdmission_DryRunSafe(t *testing.T) {
 	}
 	if len(resp.Patch) == 0 {
 		t.Errorf("dry-run should still emit a patch; API server decides whether to persist")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Chunk 2: Probe alignment tests
+// ---------------------------------------------------------------------------
+
+func TestBuildPodProbePatches_AlignRemovesInitialDelay(t *testing.T) {
+	cfg := DefaultJVMConfig()
+	cfg.AlignProbes = true
+	// InjectStartupProbe is already true in the default config.
+
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				jvmContainer("app", func(c *corev1.Container) {
+					c.LivenessProbe = httpGetLiveness("/actuator/health/liveness")
+					c.ReadinessProbe = httpGetLiveness("/actuator/health/readiness")
+				}),
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, &cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.mutationApplied {
+		t.Fatalf("expected mutationApplied = true")
+	}
+	if !patchExists(result.patches, "/spec/containers/0/livenessProbe/initialDelaySeconds") {
+		t.Errorf("expected remove patch for livenessProbe/initialDelaySeconds, got: %+v", result.patches)
+	}
+	if !patchExists(result.patches, "/spec/containers/0/readinessProbe/initialDelaySeconds") {
+		t.Errorf("expected remove patch for readinessProbe/initialDelaySeconds, got: %+v", result.patches)
+	}
+	// Sanity-check the remove op shape.
+	if p := findPatch(result.patches, "/spec/containers/0/livenessProbe/initialDelaySeconds"); p != nil && p.Op != "remove" {
+		t.Errorf("livenessProbe/initialDelaySeconds op = %q, want remove", p.Op)
+	}
+	if p := findPatch(result.patches, "/spec/containers/0/readinessProbe/initialDelaySeconds"); p != nil && p.Op != "remove" {
+		t.Errorf("readinessProbe/initialDelaySeconds op = %q, want remove", p.Op)
+	}
+}
+
+func TestBuildPodProbePatches_AlignExtendsFailureWindow(t *testing.T) {
+	cfg := DefaultJVMConfig()
+	cfg.AlignProbes = true
+	cfg.MinProbeWindowSeconds = 60
+	cfg.MaxFailureThreshold = 10
+	// InjectStartupProbe is already true in the default config.
+
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				jvmContainer("app", func(c *corev1.Container) {
+					c.LivenessProbe = &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							HTTPGet: &corev1.HTTPGetAction{
+								Path: "/health",
+								Port: intstr.FromInt(8080),
+							},
+						},
+						InitialDelaySeconds: 0,
+						PeriodSeconds:       10,
+						FailureThreshold:    3,
+					}
+				}),
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, &cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.mutationApplied {
+		t.Fatalf("expected mutationApplied = true")
+	}
+	patch := findPatch(result.patches, "/spec/containers/0/livenessProbe/failureThreshold")
+	if patch == nil {
+		t.Fatalf("expected replace patch for livenessProbe/failureThreshold, got: %+v", result.patches)
+	}
+	if patch.Op != "replace" {
+		t.Errorf("op = %q, want replace", patch.Op)
+	}
+	// math.Ceil(60/10) = 6, capped at MaxFailureThreshold=10.
+	got, ok := patch.Value.(int32)
+	if !ok {
+		t.Fatalf("failureThreshold value is not int32: %T (%v)", patch.Value, patch.Value)
+	}
+	if got != 6 {
+		t.Errorf("failureThreshold = %v, want 6", got)
+	}
+}
+
+func TestBuildPodProbePatches_AlignStripsFrameworkDelay(t *testing.T) {
+	cfg := DefaultJVMConfig()
+	cfg.AlignProbes = true
+	cfg.InjectLivenessProbe = true
+	cfg.InjectReadinessProbe = true
+	cfg.InjectStartupProbe = true
+
+	// Pod has no existing probes; framework defaults will be applied first
+	// (initialDelaySeconds=60 for spring-boot) and alignment must then
+	// strip that delay from the liveness/readiness probes.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{"other": "value"},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				jvmContainer("app", nil),
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, &cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.mutationApplied {
+		t.Fatalf("expected mutationApplied = true")
+	}
+	for _, path := range []string{
+		"/spec/containers/0/livenessProbe",
+		"/spec/containers/0/readinessProbe",
+		"/spec/containers/0/startupProbe",
+	} {
+		if !patchExists(result.patches, path) {
+			t.Errorf("expected add patch at %s, got: %+v", path, result.patches)
+		}
+	}
+
+	// The "add" patches carry the framework probes with initialDelaySeconds
+	// still set; alignment emits a follow-up "remove" patch that strips
+	// the field. Apply the patches to a copy of the Pod to observe the
+	// post-alignment state, then assert the framework's 60-second delay
+	// is gone from liveness and readiness.
+	mutated := applyPatches(t, pod, result.patches)
+	container := mutated.Spec.Containers[0]
+	if container.LivenessProbe == nil {
+		t.Fatalf("livenessProbe missing after applying patches")
+	}
+	if container.LivenessProbe.InitialDelaySeconds != 0 {
+		t.Errorf("liveness InitialDelaySeconds = %d, want 0 (alignment should have stripped framework delay)", container.LivenessProbe.InitialDelaySeconds)
+	}
+	if container.ReadinessProbe == nil {
+		t.Fatalf("readinessProbe missing after applying patches")
+	}
+	if container.ReadinessProbe.InitialDelaySeconds != 0 {
+		t.Errorf("readiness InitialDelaySeconds = %d, want 0 (alignment should have stripped framework delay)", container.ReadinessProbe.InitialDelaySeconds)
+	}
+}
+
+func TestBuildPodProbePatches_AlignDisabledByDefault(t *testing.T) {
+	cfg := DefaultJVMConfig()
+	// AlignProbes is false in DefaultJVMConfig.
+
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				jvmContainer("app", func(c *corev1.Container) {
+					c.LivenessProbe = httpGetLiveness("/health")
+				}),
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, &cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.mutationApplied {
+		t.Fatalf("expected mutationApplied = true (startup probe still injected)")
+	}
+	if patchExists(result.patches, "/spec/containers/0/livenessProbe/initialDelaySeconds") {
+		t.Errorf("did not expect alignment remove patch when AlignProbes=false; got: %+v", result.patches)
+	}
+}
+
+func TestBuildPodProbePatches_AlignAndClearDelaysNoDuplicateRemove(t *testing.T) {
+	cfg := DefaultJVMConfig()
+	cfg.AlignProbes = true
+	cfg.InjectStartupProbe = true
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				AnnotationJVMProbeClearDelays: "true",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				jvmContainer("app", func(c *corev1.Container) {
+					c.LivenessProbe = httpGetLiveness("/health")
+					c.ReadinessProbe = httpGetLiveness("/ready")
+				}),
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, &cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.mutationApplied {
+		t.Fatalf("expected mutationApplied = true")
+	}
+
+	// Exactly one remove patch per probe path: clear-delays schedules the
+	// remove, and alignment must NOT add a second one for the same path.
+	for _, path := range []string{
+		"/spec/containers/0/livenessProbe/initialDelaySeconds",
+		"/spec/containers/0/readinessProbe/initialDelaySeconds",
+	} {
+		count := 0
+		for _, p := range result.patches {
+			if p.Path == path {
+				count++
+				if p.Op != "remove" {
+					t.Errorf("patch %s: op = %q, want remove", path, p.Op)
+				}
+			}
+		}
+		if count != 1 {
+			t.Errorf("patch count for %s = %d, want 1 (duplicate removes would fail JSON Patch application); patches: %+v", path, count, result.patches)
+		}
+	}
+
+	// The patch must apply cleanly — a duplicate remove would fail here with
+	// "missing value".
+	applyPatches(t, pod, result.patches)
+}
+
+func TestBuildPodProbePatches_AlignOnlyWithStartup(t *testing.T) {
+	cfg := DefaultJVMConfig()
+	cfg.AlignProbes = true
+	cfg.InjectStartupProbe = false
+
+	// Existing startup probe means haveStartup=true, so the controller will
+	// not inject/regenerate startup and alignment must not run.
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				jvmContainer("app", func(c *corev1.Container) {
+					c.LivenessProbe = httpGetLiveness("/health")
+					c.StartupProbe = httpGetLiveness("/health")
+				}),
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, &cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if patchExists(result.patches, "/spec/containers/0/livenessProbe/initialDelaySeconds") {
+		t.Errorf("did not expect alignment remove patch when no startup probe is injected; got: %+v", result.patches)
+	}
+	if patchExists(result.patches, "/spec/containers/0/startupProbe") {
+		t.Errorf("did not expect startupProbe patch when InjectStartupProbe=false")
 	}
 }
 

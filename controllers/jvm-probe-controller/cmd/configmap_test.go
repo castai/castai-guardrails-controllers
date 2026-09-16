@@ -138,13 +138,13 @@ func TestParseJVMConfig_ExistingFieldsPreserved(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		Data: map[string]string{
 			"jvm-requireBothProbes":    "false",
-			"jvm-skipIfAnyProbeExists":  "true",
-			"jvm-injectLivenessProbe":   "true",
-			"jvm-injectReadinessProbe":  "true",
-			"jvm-injectStartupProbe":    "false",
-			"jvm-logIntendedChanges":    "true",
-			"jvm-logInterval":           "30s",
-			"jvm-reconcileInterval":     "5m",
+			"jvm-skipIfAnyProbeExists": "true",
+			"jvm-injectLivenessProbe":  "true",
+			"jvm-injectReadinessProbe": "true",
+			"jvm-injectStartupProbe":   "false",
+			"jvm-logIntendedChanges":   "true",
+			"jvm-logInterval":          "30s",
+			"jvm-reconcileInterval":    "5m",
 		},
 	}
 	cfg, errs := ParseJVMConfig(cm, "")
@@ -227,6 +227,29 @@ func TestParseJVMConfig_CanonicalModeWinsOverDeprecatedDryRun(t *testing.T) {
 	}
 	if cfg.Mode != ModeApply {
 		t.Errorf("Mode = %q, want %q (explicit mode should win)", cfg.Mode, ModeApply)
+	}
+}
+
+func TestParseJVMConfig_AlignFields(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			"jvm-alignProbes":           "true",
+			"jvm-minProbeWindowSeconds": "120",
+			"jvm-maxFailureThreshold":   "15",
+		},
+	}
+	cfg, errs := ParseJVMConfig(cm, "")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if !cfg.AlignProbes {
+		t.Errorf("AlignProbes = false, want true")
+	}
+	if cfg.MinProbeWindowSeconds != 120 {
+		t.Errorf("MinProbeWindowSeconds = %d, want 120", cfg.MinProbeWindowSeconds)
+	}
+	if cfg.MaxFailureThreshold != 15 {
+		t.Errorf("MaxFailureThreshold = %d, want 15", cfg.MaxFailureThreshold)
 	}
 }
 

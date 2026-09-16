@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -23,11 +24,11 @@ const (
 // Canonical model:
 //   - ManagementEnabled: master switch. false = stop patching.
 //   - Mode:              "apply" (patch). The previous "recommend" mode is
-//                        removed in the webhook migration: per-Pod admission
-//                        has no snapshot-only mode. Only "apply" is valid
-//                        for the webhook. Legacy ConfigMaps that set
-//                        mode=recommend are migrated to mode=apply at load
-//                        time with an info-level log line.
+//     removed in the webhook migration: per-Pod admission
+//     has no snapshot-only mode. Only "apply" is valid
+//     for the webhook. Legacy ConfigMaps that set
+//     mode=recommend are migrated to mode=apply at load
+//     time with an info-level log line.
 //
 // Deprecated keys (jvm-enableProbeManagement, jvm-dryRun) are still parsed
 // for backward compatibility. jvm-enableProbeManagement maps onto
@@ -36,16 +37,26 @@ const (
 // the controller runs as a live mutating webhook.
 type JVMConfig struct {
 	// Existing fields
-	Frameworks            map[string]FrameworkConfig `json:"frameworks"`
-	LogInterval           string                     `json:"logInterval"`
-	ReconcileInterval     string                     `json:"reconcileInterval"`
-	RequireBothProbes     bool                       `json:"requireBothProbes"`
-	SkipIfAnyProbeExists  bool                       `json:"skipIfAnyProbeExists"`
-	Exclusions            string                     `json:"exclusions"`
-	InjectLivenessProbe   bool                       `json:"injectLivenessProbe"`
-	InjectReadinessProbe  bool                       `json:"injectReadinessProbe"`
-	InjectStartupProbe    bool                       `json:"injectStartupProbe"`
-	LogIntendedChanges    bool                       `json:"logIntendedChanges"`
+	Frameworks           map[string]FrameworkConfig `json:"frameworks"`
+	LogInterval          string                     `json:"logInterval"`
+	ReconcileInterval    string                     `json:"reconcileInterval"`
+	RequireBothProbes    bool                       `json:"requireBothProbes"`
+	SkipIfAnyProbeExists bool                       `json:"skipIfAnyProbeExists"`
+	Exclusions           string                     `json:"exclusions"`
+	InjectLivenessProbe  bool                       `json:"injectLivenessProbe"`
+	InjectReadinessProbe bool                       `json:"injectReadinessProbe"`
+	InjectStartupProbe   bool                       `json:"injectStartupProbe"`
+	LogIntendedChanges   bool                       `json:"logIntendedChanges"`
+
+	// Chunk 2: probe alignment. When AlignProbes is true and a startup
+	// probe is being injected for a container, the controller adjusts the
+	// liveness/readiness probes so they cover at least MinProbeWindowSeconds
+	// of total observation time (periodSeconds*failureThreshold). It also
+	// strips initialDelaySeconds so the startup probe gates startup
+	// correctly.
+	AlignProbes           bool  `json:"alignProbes"`
+	MinProbeWindowSeconds int32 `json:"minProbeWindowSeconds"`
+	MaxFailureThreshold   int32 `json:"maxFailureThreshold"`
 
 	// Canonical state fields
 	ManagementEnabled bool   `json:"managementEnabled"`
@@ -141,6 +152,25 @@ func ParseJVMConfig(cm *corev1.ConfigMap, envVersion string) (*JVMConfig, []erro
 
 	if v, ok := data["jvm-logIntendedChanges"]; ok {
 		cfg.LogIntendedChanges = v == "true"
+	}
+
+	// Chunk 2: probe alignment fields.
+	if v, ok := data["jvm-alignProbes"]; ok {
+		cfg.AlignProbes = v == "true"
+	}
+	if v, ok := data["jvm-minProbeWindowSeconds"]; ok && v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.MinProbeWindowSeconds = int32(n)
+		} else {
+			errs = append(errs, fmt.Errorf("invalid jvm-minProbeWindowSeconds %q: %w", v, err))
+		}
+	}
+	if v, ok := data["jvm-maxFailureThreshold"]; ok && v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.MaxFailureThreshold = int32(n)
+		} else {
+			errs = append(errs, fmt.Errorf("invalid jvm-maxFailureThreshold %q: %w", v, err))
+		}
 	}
 
 	// Canonical state fields (no jvm- prefix — matches the rendered ConfigMap).
