@@ -38,8 +38,13 @@ type ContainerInfo struct {
 	IsJVM     bool
 	Framework string // "spring-boot", "quarkus", "micronaut", "generic"
 	Port      int32
-	Ports     []corev1.ContainerPort
-	Env       []corev1.EnvVar
+	// PortName is the preferred named container port (e.g. "http"), empty
+	// when the resolved port should be referenced numerically. Probe
+	// builders prefer this over the numeric Port whenever it is non-empty
+	// and no workloads.cast.ai/jvm-probe-port annotation override is set.
+	PortName string
+	Ports    []corev1.ContainerPort
+	Env      []corev1.EnvVar
 }
 
 // Framework constants
@@ -224,13 +229,26 @@ func DetectJVMContainer(container corev1.Container) ContainerInfo {
 	}
 
 	// Detect port from container ports
-	info.Port = detectContainerPort(container)
+	info.Port, info.PortName = detectContainerPort(container)
 
 	return info
 }
 
-// detectContainerPort attempts to find the HTTP port from container definitions
-func detectContainerPort(container corev1.Container) int32 {
+// detectContainerPort attempts to find the HTTP port from container
+// definitions. It returns the numeric port to use alongside the port's
+// name when the selected entry has one.
+//
+// Resolution order:
+//  1. Well-known named ports (http, web, https, http-web): return the
+//     port's numeric value together with its Name so callers can emit
+//     an intstr.String probe reference.
+//  2. Common JVM numeric ports (8080, 8443, 9090, 8888): return the
+//     numeric value with an empty name. Only well-known names trigger
+//     the string form; an arbitrary name on a common port does not.
+//  3. The first declared port: return its numeric value and Name (which
+//     may be empty).
+//  4. Ultimate fallback: (8080, "").
+func detectContainerPort(container corev1.Container) (int32, string) {
 	// First try named ports
 	for _, port := range container.Ports {
 		portNameLower := strings.ToLower(port.Name)
@@ -238,7 +256,7 @@ func detectContainerPort(container corev1.Container) int32 {
 			portNameLower == "web" ||
 			portNameLower == "http-web" ||
 			portNameLower == "https" {
-			return port.ContainerPort
+			return port.ContainerPort, port.Name
 		}
 	}
 
@@ -248,16 +266,17 @@ func detectContainerPort(container corev1.Container) int32 {
 			port.ContainerPort == 8443 ||
 			port.ContainerPort == 9090 ||
 			port.ContainerPort == 8888 {
-			return port.ContainerPort
+			return port.ContainerPort, ""
 		}
 	}
 
-	// Default to 8080 if no port found
+	// Default to the first declared port if no port matched above.
 	if len(container.Ports) > 0 {
-		return container.Ports[0].ContainerPort
+		p := container.Ports[0]
+		return p.ContainerPort, p.Name
 	}
 
-	return 8080
+	return 8080, ""
 }
 
 // DetectFramework determines the framework type from container info
@@ -281,7 +300,7 @@ type ExclusionRule struct {
 
 // ExclusionRules holds compiled exclusion rules
 type ExclusionRules struct {
-	rules []ExclusionRule
+	rules             []ExclusionRule
 	compiledNamespace []*regexp.Regexp
 	compiledName      []*regexp.Regexp
 }

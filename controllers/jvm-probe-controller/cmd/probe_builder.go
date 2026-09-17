@@ -10,68 +10,68 @@ import (
 
 // FrameworkConfig holds the probe configuration for a specific framework
 type FrameworkConfig struct {
-	LivenessPath         string `yaml:"livenessPath"`
-	ReadinessPath        string `yaml:"readinessPath"`
-	StartupPath          string `yaml:"startupPath"`
-	DefaultPort          int32  `yaml:"defaultPort"`
+	LivenessPath        string `yaml:"livenessPath"`
+	ReadinessPath       string `yaml:"readinessPath"`
+	StartupPath         string `yaml:"startupPath"`
+	DefaultPort         int32  `yaml:"defaultPort"`
 	InitialDelaySeconds int32  `yaml:"initialDelaySeconds"`
-	PeriodSeconds        int32  `yaml:"periodSeconds"`
-	TimeoutSeconds       int32  `yaml:"timeoutSeconds"`
-	FailureThreshold     int32  `yaml:"failureThreshold"`
-	SuccessThreshold     int32  `yaml:"successThreshold"`
-	UseTCPSocket         bool   `yaml:"useTCPSocket"`
+	PeriodSeconds       int32  `yaml:"periodSeconds"`
+	TimeoutSeconds      int32  `yaml:"timeoutSeconds"`
+	FailureThreshold    int32  `yaml:"failureThreshold"`
+	SuccessThreshold    int32  `yaml:"successThreshold"`
+	UseTCPSocket        bool   `yaml:"useTCPSocket"`
 }
 
 // DefaultFrameworkConfigs returns default framework configurations
 func DefaultFrameworkConfigs() map[string]FrameworkConfig {
 	return map[string]FrameworkConfig{
 		FrameworkSpringBoot: {
-			LivenessPath:         "/actuator/health/liveness",
-			ReadinessPath:        "/actuator/health/readiness",
-			StartupPath:          "/actuator/health",
-			DefaultPort:          8080,
-			InitialDelaySeconds:  60,
-			PeriodSeconds:        10,
-			TimeoutSeconds:       5,
-			FailureThreshold:     3,
-			SuccessThreshold:     1,
-			UseTCPSocket:         false,
+			LivenessPath:        "/actuator/health/liveness",
+			ReadinessPath:       "/actuator/health/readiness",
+			StartupPath:         "/actuator/health",
+			DefaultPort:         8080,
+			InitialDelaySeconds: 60,
+			PeriodSeconds:       10,
+			TimeoutSeconds:      5,
+			FailureThreshold:    3,
+			SuccessThreshold:    1,
+			UseTCPSocket:        false,
 		},
 		FrameworkQuarkus: {
-			LivenessPath:         "/q/health/live",
-			ReadinessPath:        "/q/health/ready",
-			StartupPath:          "/q/health/started",
-			DefaultPort:          8080,
-			InitialDelaySeconds:  30,
-			PeriodSeconds:        10,
-			TimeoutSeconds:       5,
-			FailureThreshold:     3,
-			SuccessThreshold:     1,
-			UseTCPSocket:         false,
+			LivenessPath:        "/q/health/live",
+			ReadinessPath:       "/q/health/ready",
+			StartupPath:         "/q/health/started",
+			DefaultPort:         8080,
+			InitialDelaySeconds: 30,
+			PeriodSeconds:       10,
+			TimeoutSeconds:      5,
+			FailureThreshold:    3,
+			SuccessThreshold:    1,
+			UseTCPSocket:        false,
 		},
 		FrameworkMicronaut: {
-			LivenessPath:         "/health/liveness",
-			ReadinessPath:        "/health/readiness",
-			StartupPath:          "/health",
-			DefaultPort:          8080,
-			InitialDelaySeconds:  30,
-			PeriodSeconds:        10,
-			TimeoutSeconds:       5,
-			FailureThreshold:     3,
-			SuccessThreshold:     1,
-			UseTCPSocket:         false,
+			LivenessPath:        "/health/liveness",
+			ReadinessPath:       "/health/readiness",
+			StartupPath:         "/health",
+			DefaultPort:         8080,
+			InitialDelaySeconds: 30,
+			PeriodSeconds:       10,
+			TimeoutSeconds:      5,
+			FailureThreshold:    3,
+			SuccessThreshold:    1,
+			UseTCPSocket:        false,
 		},
 		FrameworkGeneric: {
-			LivenessPath:         "",
-			ReadinessPath:        "",
-			StartupPath:          "",
-			DefaultPort:          8080,
-			InitialDelaySeconds:  30,
-			PeriodSeconds:        10,
-			TimeoutSeconds:       5,
-			FailureThreshold:     3,
-			SuccessThreshold:     1,
-			UseTCPSocket:         true,
+			LivenessPath:        "",
+			ReadinessPath:       "",
+			StartupPath:         "",
+			DefaultPort:         8080,
+			InitialDelaySeconds: 30,
+			PeriodSeconds:       10,
+			TimeoutSeconds:      5,
+			FailureThreshold:    3,
+			SuccessThreshold:    1,
+			UseTCPSocket:        true,
 		},
 	}
 }
@@ -79,21 +79,25 @@ func DefaultFrameworkConfigs() map[string]FrameworkConfig {
 // DefaultJVMConfig returns the default JVM configuration
 func DefaultJVMConfig() JVMConfig {
 	return JVMConfig{
-		Frameworks:             DefaultFrameworkConfigs(),
-		LogInterval:            "15m",
-		ReconcileInterval:      "2m",
-		RequireBothProbes:      true,
-		SkipIfAnyProbeExists:   true,
+		Frameworks:           DefaultFrameworkConfigs(),
+		LogInterval:          "15m",
+		ReconcileInterval:    "2m",
+		RequireBothProbes:    true,
+		SkipIfAnyProbeExists: true,
 		// P1: Liveness opt-in (safer default)
-		InjectLivenessProbe:    false,
-		InjectReadinessProbe:   true,
-		InjectStartupProbe:     true,
-		LogIntendedChanges:     true,
+		InjectLivenessProbe:  false,
+		InjectReadinessProbe: true,
+		InjectStartupProbe:   true,
+		LogIntendedChanges:   true,
+		// Chunk 2: probe alignment defaults.
+		AlignProbes:           false,
+		MinProbeWindowSeconds: 60,
+		MaxFailureThreshold:   10,
 		// Canonical state defaults
-		ManagementEnabled:      true,
-		Mode:                   ModeApply,
-		OperatorNamespace:      "castai-agent",
-		Version:                "dev",
+		ManagementEnabled: true,
+		Mode:              ModeApply,
+		OperatorNamespace: "castai-agent",
+		Version:           "dev",
 	}
 }
 
@@ -107,6 +111,14 @@ func BuildProbesForFramework(framework string, containerInfo ContainerInfo, anno
 
 	// Allow annotation overrides
 	port := getAnnotationInt(annotations, AnnotationJVMProbePort, containerInfo.Port)
+	// portName is preferred over the numeric port reference, but the
+	// annotation override must always win: when AnnotationJVMProbePort is
+	// set the user is explicitly forcing a numeric port, so we suppress
+	// the named-port form even if ContainerInfo.PortName was detected.
+	portName := ""
+	if _, ok := annotations[AnnotationJVMProbePort]; !ok {
+		portName = containerInfo.PortName
+	}
 	initialDelay := getAnnotationInt(annotations, AnnotationJVMProbeInitialDelay, frameworkConfig.InitialDelaySeconds)
 	period := getAnnotationInt(annotations, AnnotationJVMProbePeriod, frameworkConfig.PeriodSeconds)
 	timeout := getAnnotationInt(annotations, AnnotationJVMProbeTimeout, frameworkConfig.TimeoutSeconds)
@@ -132,40 +144,42 @@ func BuildProbesForFramework(framework string, containerInfo ContainerInfo, anno
 	// Build liveness probe (only if enabled)
 	if injectLiveness {
 		if useTCP {
-			liveness = buildTCPProbe(port, initialDelay, period, timeout, failureThreshold)
+			liveness = buildTCPProbe(port, portName, initialDelay, period, timeout, failureThreshold)
 		} else if livenessPath != "" {
-			liveness = buildHTTPGetProbe(port, livenessPath, initialDelay, period, timeout, failureThreshold, successThreshold)
+			liveness = buildHTTPGetProbe(port, portName, livenessPath, initialDelay, period, timeout, failureThreshold, successThreshold)
 		}
 	}
 
 	// Build readiness probe (only if enabled)
 	if injectReadiness {
 		if useTCP {
-			readiness = buildTCPProbe(port, initialDelay, period, timeout, failureThreshold)
+			readiness = buildTCPProbe(port, portName, initialDelay, period, timeout, failureThreshold)
 		} else if readinessPath != "" {
-			readiness = buildHTTPGetProbe(port, readinessPath, initialDelay, period, timeout, failureThreshold, successThreshold)
+			readiness = buildHTTPGetProbe(port, portName, readinessPath, initialDelay, period, timeout, failureThreshold, successThreshold)
 		}
 	}
 
 	// Build startup probe (only if enabled)
 	if injectStartup {
 		if useTCP {
-			startup = buildTCPProbe(port, initialDelay*3, period, timeout, failureThreshold*2)
+			startup = buildTCPProbe(port, portName, initialDelay*3, period, timeout, failureThreshold*2)
 		} else if startupPath != "" {
-			startup = buildHTTPGetProbe(port, startupPath, initialDelay, period, timeout, failureThreshold*2, successThreshold)
+			startup = buildHTTPGetProbe(port, portName, startupPath, initialDelay, period, timeout, failureThreshold*2, successThreshold)
 		}
 	}
 
 	return liveness, readiness, startup
 }
 
-// buildHTTPGetProbe creates an HTTP GET probe
-func buildHTTPGetProbe(port int32, path string, initialDelay, period, timeout, failureThreshold, successThreshold int32) *corev1.Probe {
+// buildHTTPGetProbe creates an HTTP GET probe. When portName is non-empty
+// the probe references the named port (intstr.String) so it survives a
+// container port number change; otherwise the numeric port is used.
+func buildHTTPGetProbe(port int32, portName, path string, initialDelay, period, timeout, failureThreshold, successThreshold int32) *corev1.Probe {
 	return &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
 				Path:   path,
-				Port:   intstr.FromInt(int(port)),
+				Port:   portValueFor(port, portName),
 				Scheme: corev1.URISchemeHTTP,
 			},
 		},
@@ -177,12 +191,14 @@ func buildHTTPGetProbe(port int32, path string, initialDelay, period, timeout, f
 	}
 }
 
-// buildTCPProbe creates a TCP socket probe
-func buildTCPProbe(port int32, initialDelay, period, timeout, failureThreshold int32) *corev1.Probe {
+// buildTCPProbe creates a TCP socket probe. When portName is non-empty
+// the probe references the named port (intstr.String) so it survives a
+// container port number change; otherwise the numeric port is used.
+func buildTCPProbe(port int32, portName string, initialDelay, period, timeout, failureThreshold int32) *corev1.Probe {
 	return &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			TCPSocket: &corev1.TCPSocketAction{
-				Port: intstr.FromInt(int(port)),
+				Port: portValueFor(port, portName),
 			},
 		},
 		InitialDelaySeconds: initialDelay,
@@ -191,6 +207,16 @@ func buildTCPProbe(port int32, initialDelay, period, timeout, failureThreshold i
 		FailureThreshold:    failureThreshold,
 		SuccessThreshold:    1,
 	}
+}
+
+// portValueFor returns the intstr.IntOrString to embed in a probe.
+// Non-empty portName wins so callers can keep named-port references
+// alive across container port renumbering.
+func portValueFor(port int32, portName string) intstr.IntOrString {
+	if portName != "" {
+		return intstr.FromString(portName)
+	}
+	return intstr.FromInt(int(port))
 }
 
 // getAnnotation retrieves an annotation value with a fallback
@@ -231,19 +257,19 @@ func CloneProbe(probe *corev1.Probe) *corev1.Probe {
 
 // Annotations for probe injection tracking
 const (
-	AnnotationPrefix                      = "workloads.cast.ai/jvm-probe-"
-	AnnotationJVMBypass                   = AnnotationPrefix + "bypass"
-	AnnotationJVMFramework                = AnnotationPrefix + "framework"
-	AnnotationJVMProbePort                = AnnotationPrefix + "port"
-	AnnotationJVMProbeLivenessPath        = AnnotationPrefix + "liveness-path"
-	AnnotationJVMProbeReadinessPath       = AnnotationPrefix + "readiness-path"
-	AnnotationJVMProbeStartupPath         = AnnotationPrefix + "startup-path"
-	AnnotationJVMProbeInitialDelay        = AnnotationPrefix + "initial-delay"
-	AnnotationJVMProbePeriod              = AnnotationPrefix + "period"
-	AnnotationJVMProbeTimeout             = AnnotationPrefix + "timeout"
-	AnnotationJVMProbeFailureThreshold    = AnnotationPrefix + "failure-threshold"
-	AnnotationJVMProbeSuccessThreshold    = AnnotationPrefix + "success-threshold"
-	AnnotationJVMProbeManaged             = AnnotationPrefix + "managed"
+	AnnotationPrefix                   = "workloads.cast.ai/jvm-probe-"
+	AnnotationJVMBypass                = AnnotationPrefix + "bypass"
+	AnnotationJVMFramework             = AnnotationPrefix + "framework"
+	AnnotationJVMProbePort             = AnnotationPrefix + "port"
+	AnnotationJVMProbeLivenessPath     = AnnotationPrefix + "liveness-path"
+	AnnotationJVMProbeReadinessPath    = AnnotationPrefix + "readiness-path"
+	AnnotationJVMProbeStartupPath      = AnnotationPrefix + "startup-path"
+	AnnotationJVMProbeInitialDelay     = AnnotationPrefix + "initial-delay"
+	AnnotationJVMProbePeriod           = AnnotationPrefix + "period"
+	AnnotationJVMProbeTimeout          = AnnotationPrefix + "timeout"
+	AnnotationJVMProbeFailureThreshold = AnnotationPrefix + "failure-threshold"
+	AnnotationJVMProbeSuccessThreshold = AnnotationPrefix + "success-threshold"
+	AnnotationJVMProbeManaged          = AnnotationPrefix + "managed"
 )
 
 // GetProbeAnnotations returns annotations to mark probes as managed
