@@ -9,7 +9,7 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /workspace/controllers/pdb-controller/castai-pdb-controller-bin ./cmd
 
-FROM alpine:3.19
+FROM alpine:3.22
 WORKDIR /app
 COPY --from=builder /workspace/controllers/pdb-controller/castai-pdb-controller-bin .
 CMD ["./castai-pdb-controller-bin"]

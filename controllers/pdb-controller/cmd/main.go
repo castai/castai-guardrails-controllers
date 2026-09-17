@@ -64,6 +64,7 @@ type DefaultPDBConfig struct {
 	GarbageCollectInterval     time.Duration
 	PDBDumpInterval            time.Duration
 	Exclusions                 []ExclusionRule
+	AdditionalSelectorLabels   []string
 }
 
 var (
@@ -76,6 +77,11 @@ var (
 	warnLogTimesLock sync.Mutex
 	fixLogTimes      = make(map[string]time.Time)
 	fixLogTimesLock  sync.Mutex
+
+	// First time a controller-owned PDB was observed with DisruptionsAllowed==0
+	// (and populated status). Used only for warning duration; never drives deletes.
+	disruptionBlockedSince     = make(map[string]time.Time)
+	disruptionBlockedSinceLock sync.Mutex
 )
 
 // isWorkloadExcluded checks if a workload should be excluded from PDB creation based on exclusion rules
@@ -200,8 +206,119 @@ func unhealthyPodEvictionPoliciesEqual(a, b *policyv1.UnhealthyPodEvictionPolicy
 	return *a == *b
 }
 
+const (
+	pdbDeletionPollInterval = 100 * time.Millisecond
+	pdbDeletionPollTimeout  = 5 * time.Second
+)
+
+// deleteCastaiPDBIfUnderReplicated removes the castai-managed PDB when a workload has
+// fewer than 2 replicas. Returns true when the caller should stop processing.
+// Logs only when a PDB is actually deleted — single-replica workloads are reconciled
+// often, and logging "deleting" on every NotFound no-op was misleading/noisy.
+func deleteCastaiPDBIfUnderReplicated(ctx context.Context, clientset kubernetes.Interface, namespace, workloadName string, replicas *int32) bool {
+	if replicas != nil && *replicas >= 2 {
+		return false
+	}
+	pdbName := fmt.Sprintf("castai-%s-pdb", workloadName)
+	err := clientset.PolicyV1().PodDisruptionBudgets(namespace).Delete(ctx, pdbName, metav1.DeleteOptions{})
+	if err == nil {
+		logInfof("Workload %s/%s has fewer than 2 replicas; deleted PDB %s to prevent blocking disruptions\n", namespace, workloadName, pdbName)
+	} else if apierrors.IsNotFound(err) {
+		logDebugf("Workload %s/%s has fewer than 2 replicas; no PDB %s to delete\n", namespace, workloadName, pdbName)
+	} else {
+		logErrorf("Failed to delete PDB %s/%s for scaled-down workload: %v\n", namespace, pdbName, err)
+	}
+	return true
+}
+
+// workloadReplicaHealth reads desired/ready/available replica counts from a
+// Deployment or StatefulSet. StatefulSets have no AvailableReplicas; available
+// is set equal to ready so callers can use one comparison path.
+func workloadReplicaHealth(obj interface{}) (desired, ready, available int32, ok bool) {
+	switch w := obj.(type) {
+	case *appsv1.Deployment:
+		desired = 1
+		if w.Spec.Replicas != nil {
+			desired = *w.Spec.Replicas
+		}
+		return desired, w.Status.ReadyReplicas, w.Status.AvailableReplicas, true
+	case *appsv1.StatefulSet:
+		desired = 1
+		if w.Spec.Replicas != nil {
+			desired = *w.Spec.Replicas
+		}
+		return desired, w.Status.ReadyReplicas, w.Status.ReadyReplicas, true
+	default:
+		return 0, 0, 0, false
+	}
+}
+
+// workloadReadyForNewPDB reports whether a multi-replica workload is fully
+// ready/available and safe to receive a newly created castai PDB.
+func workloadReadyForNewPDB(desired, ready, available int32) bool {
+	return desired >= 2 && ready >= desired && available >= desired
+}
+
+// waitForPDBDeletion polls until the PDB is gone or a bounded timeout elapses.
+func waitForPDBDeletion(ctx context.Context, clientset kubernetes.Interface, namespace, name string) {
+	if clientset == nil {
+		return
+	}
+	deadline := time.Now().Add(pdbDeletionPollTimeout)
+	for {
+		_, err := clientset.PolicyV1().PodDisruptionBudgets(namespace).Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(pdbDeletionPollInterval):
+		}
+	}
+}
+
+// pdbSpecNeedsUpdate checks if the new PDB spec differs from the existing one (MinAvailable, MaxUnavailable, UnhealthyPodEvictionPolicy).
+func pdbSpecNeedsUpdate(existing, desired *policyv1.PodDisruptionBudgetSpec) bool {
+	// Check MinAvailable
+	if existing.MinAvailable == nil && desired.MinAvailable != nil {
+		return true
+	} else if existing.MinAvailable != nil && desired.MinAvailable == nil {
+		return true
+	} else if existing.MinAvailable != nil && desired.MinAvailable != nil {
+		if existing.MinAvailable.String() != desired.MinAvailable.String() {
+			return true
+		}
+	}
+
+	// Check MaxUnavailable
+	if existing.MaxUnavailable == nil && desired.MaxUnavailable != nil {
+		return true
+	} else if existing.MaxUnavailable != nil && desired.MaxUnavailable == nil {
+		return true
+	} else if existing.MaxUnavailable != nil && desired.MaxUnavailable != nil {
+		if existing.MaxUnavailable.String() != desired.MaxUnavailable.String() {
+			return true
+		}
+	}
+
+	// Check UnhealthyPodEvictionPolicy
+	if !unhealthyPodEvictionPoliciesEqual(existing.UnhealthyPodEvictionPolicy, desired.UnhealthyPodEvictionPolicy) {
+		return true
+	}
+
+	return false
+}
+
 // updateExistingPDB updates an existing castai PDB with new configuration
 func updateExistingPDB(ctx context.Context, clientset kubernetes.Interface, existingPDB *policyv1.PodDisruptionBudget, workloadAnnotations map[string]string, replicas *int32, namespace, name string, obj interface{}) {
+	if deleteCastaiPDBIfUnderReplicated(ctx, clientset, namespace, name, replicas) {
+		return
+	}
+
 	// Parse PDB configuration from annotations or defaults
 	var minAvailable, maxUnavailable *intstr.IntOrString
 	var needsUpdate bool
@@ -230,8 +347,20 @@ func updateExistingPDB(ctx context.Context, clientset kubernetes.Interface, exis
 	}
 
 	// Create PDB spec
+	selectorBasis := existingPDB.Spec.Selector
+	if selectorBasis == nil {
+		// PDB selectors are immutable; a nil existing selector cannot be
+		// updated in place. Use the workload's selector as the basis so
+		// enrichment and the recreate path produce a valid non-nil selector.
+		switch workload := obj.(type) {
+		case *appsv1.Deployment:
+			selectorBasis = workload.Spec.Selector
+		case *appsv1.StatefulSet:
+			selectorBasis = workload.Spec.Selector
+		}
+	}
 	pdbSpec := policyv1.PodDisruptionBudgetSpec{
-		Selector: existingPDB.Spec.Selector,
+		Selector: selectorBasis,
 	}
 
 	if minAvailable != nil {
@@ -242,30 +371,65 @@ func updateExistingPDB(ctx context.Context, clientset kubernetes.Interface, exis
 
 	pdbSpec.UnhealthyPodEvictionPolicy = resolveUnhealthyPodEvictionPolicy(workloadAnnotations)
 
+	// Enrich selector with additional labels (same as in createPDBForWorkload)
+	var podTemplateLabels map[string]string
+	switch workload := obj.(type) {
+	case *appsv1.Deployment:
+		podTemplateLabels = workload.Spec.Template.Labels
+	case *appsv1.StatefulSet:
+		podTemplateLabels = workload.Spec.Template.Labels
+	}
+
+	defaultPDBConfigLock.RLock()
+	additionalSelectorLabels := defaultPDBConfig.AdditionalSelectorLabels
+	defaultPDBConfigLock.RUnlock()
+
+	enrichedSelector := enrichSelectorWithAdditionalLabels(pdbSpec.Selector, podTemplateLabels, additionalSelectorLabels)
+	pdbSpec.Selector = enrichedSelector
+
+	// Check if selector changed (immutable field requires delete & recreate).
+	// The selector is mutated whenever either side is nil but the other is not,
+	// or when both sides are non-nil but their parsed string forms differ.
+	selectorChanged := (existingPDB.Spec.Selector == nil) != (enrichedSelector == nil)
+	if !selectorChanged && existingPDB.Spec.Selector != nil && enrichedSelector != nil {
+		existingPDBSel, err := metav1.LabelSelectorAsSelector(existingPDB.Spec.Selector)
+		if err != nil {
+			logErrorf("Failed to parse existing PDB selector for %s/%s: %v, deleting to recreate\n", namespace, name, err)
+			delErr := clientset.PolicyV1().PodDisruptionBudgets(namespace).Delete(ctx, existingPDB.Name, metav1.DeleteOptions{})
+			if delErr != nil && !apierrors.IsNotFound(delErr) {
+				logErrorf("Failed to delete malformed PDB %s/%s: %v\n", namespace, name, delErr)
+				return
+			}
+			waitForPDBDeletion(ctx, clientset, namespace, existingPDB.Name)
+			createPDBForWorkload(ctx, clientset, obj)
+			return
+		}
+		enrichedSel, err := metav1.LabelSelectorAsSelector(enrichedSelector)
+		if err != nil {
+			logErrorf("Failed to parse enriched selector for %s/%s: %v\n", namespace, name, err)
+			return
+		}
+		if existingPDBSel.String() != enrichedSel.String() {
+			selectorChanged = true
+		}
+	}
+	if selectorChanged {
+		// Selectors differ (including nil→non-nil or non-nil→nil transitions);
+		// delete and recreate after a brief wait so the deletion has time to
+		// propagate before the recreate path runs.
+		err := clientset.PolicyV1().PodDisruptionBudgets(namespace).Delete(ctx, existingPDB.Name, metav1.DeleteOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			logErrorf("Failed to delete PDB %s/%s for recreation: %v\n", namespace, name, err)
+			return
+		}
+		logInfof("Deleted PDB %s/%s due to selector change, recreating\n", namespace, name)
+		waitForPDBDeletion(ctx, clientset, namespace, existingPDB.Name)
+		createPDBForWorkload(ctx, clientset, obj)
+		return
+	}
+
 	// Check if update is needed
-	if existingPDB.Spec.MinAvailable == nil && pdbSpec.MinAvailable != nil {
-		needsUpdate = true
-	} else if existingPDB.Spec.MinAvailable != nil && pdbSpec.MinAvailable == nil {
-		needsUpdate = true
-	} else if existingPDB.Spec.MinAvailable != nil && pdbSpec.MinAvailable != nil {
-		if existingPDB.Spec.MinAvailable.String() != pdbSpec.MinAvailable.String() {
-			needsUpdate = true
-		}
-	}
-
-	if existingPDB.Spec.MaxUnavailable == nil && pdbSpec.MaxUnavailable != nil {
-		needsUpdate = true
-	} else if existingPDB.Spec.MaxUnavailable != nil && pdbSpec.MaxUnavailable == nil {
-		needsUpdate = true
-	} else if existingPDB.Spec.MaxUnavailable != nil && pdbSpec.MaxUnavailable != nil {
-		if existingPDB.Spec.MaxUnavailable.String() != pdbSpec.MaxUnavailable.String() {
-			needsUpdate = true
-		}
-	}
-
-	if !unhealthyPodEvictionPoliciesEqual(existingPDB.Spec.UnhealthyPodEvictionPolicy, pdbSpec.UnhealthyPodEvictionPolicy) {
-		needsUpdate = true
-	}
+	needsUpdate = pdbSpecNeedsUpdate(&existingPDB.Spec, &pdbSpec)
 
 	if needsUpdate {
 		existingPDB.Spec = pdbSpec
@@ -593,6 +757,15 @@ func updateDefaultPDBConfig(ctx context.Context, cm *corev1.ConfigMap, clientset
 		unhealthyPodEviction = parseUnhealthyPodEvictionPolicy(val)
 	}
 
+	// Parse additional selector label keys from ConfigMap
+	var additionalSelectorLabels []string
+	if raw, ok := cm.Data["additionalSelectorLabels"]; ok && raw != "" {
+		if err := yaml.Unmarshal([]byte(raw), &additionalSelectorLabels); err != nil {
+			logWarnf("Warning: failed to parse additionalSelectorLabels from ConfigMap: %v\n", err)
+			additionalSelectorLabels = nil
+		}
+	}
+
 	defaultPDBConfigLock.Lock()
 	defaultPDBConfig.MinAvailable = minAvailable
 	defaultPDBConfig.MaxUnavailable = maxUnavailable
@@ -603,12 +776,13 @@ func updateDefaultPDBConfig(ctx context.Context, cm *corev1.ConfigMap, clientset
 	defaultPDBConfig.GarbageCollectInterval = garbageCollectInterval
 	defaultPDBConfig.PDBDumpInterval = pdbDumpInterval
 	defaultPDBConfig.Exclusions = exclusions
+	defaultPDBConfig.AdditionalSelectorLabels = additionalSelectorLabels
 	defaultPDBConfigLock.Unlock()
 
 	logInfof("Default PDB config updated from ConfigMap: defaultMinAvailable=%v, defaultMaxUnavailable=%v, defaultUnhealthyPodEvictionPolicy=%v, FixPoorPDBs=%v, "+
-		"logInterval=%v, pdbScanInterval=%v, garbageCollectInterval=%v, pdbDumpInterval=%v, exclusions=%d rules\n",
+		"logInterval=%v, pdbScanInterval=%v, garbageCollectInterval=%v, pdbDumpInterval=%v, exclusions=%d rules, additionalSelectorLabels=%v\n",
 		minAvailable, maxUnavailable, unhealthyPodEvictionStr(unhealthyPodEviction), fixPoorPDBs, logInterval, pdbScanInterval,
-		garbageCollectInterval, pdbDumpInterval, len(exclusions))
+		garbageCollectInterval, pdbDumpInterval, len(exclusions), additionalSelectorLabels)
 
 	logDebugf("Final exclusion rules loaded: %d rules", len(exclusions))
 	for i, rule := range exclusions {
@@ -633,10 +807,36 @@ func resetDefaultPDBConfig() {
 	defaultPDBConfig.GarbageCollectInterval = defaultGarbageCollectInterval
 	defaultPDBConfig.PDBDumpInterval = defaultPDBDumpInterval
 	defaultPDBConfig.Exclusions = nil
+	defaultPDBConfig.AdditionalSelectorLabels = nil
 	defaultPDBConfig.UnhealthyPodEvictionPolicy = nil
 	defaultPDBConfigLock.Unlock()
+	disruptionBlockedSinceLock.Lock()
+	disruptionBlockedSince = make(map[string]time.Time)
+	disruptionBlockedSinceLock.Unlock()
 	syncLogLevelFromData(nil)
 	logInfof("Default PDB config reset: using built-in fallback\n")
+}
+
+// enrichSelectorWithAdditionalLabels returns a deep copy of the selector with any keys from
+// additionalKeys that are present in podTemplateLabels appended to MatchLabels. Keys absent
+// from podTemplateLabels are silently skipped. Existing MatchLabels keys are never overwritten.
+func enrichSelectorWithAdditionalLabels(selector *metav1.LabelSelector, podTemplateLabels map[string]string, additionalKeys []string) *metav1.LabelSelector {
+	if selector == nil || len(additionalKeys) == 0 || len(podTemplateLabels) == 0 {
+		return selector
+	}
+	enriched := selector.DeepCopy()
+	if enriched.MatchLabels == nil {
+		enriched.MatchLabels = make(map[string]string)
+	}
+	for _, key := range additionalKeys {
+		if _, alreadyPresent := enriched.MatchLabels[key]; alreadyPresent {
+			continue
+		}
+		if val, inTemplate := podTemplateLabels[key]; inTemplate {
+			enriched.MatchLabels[key] = val
+		}
+	}
+	return enriched
 }
 
 // loads the configmap values
@@ -702,6 +902,7 @@ func runController(ctx context.Context, clientset *kubernetes.Clientset) {
 				}
 				scanAllPDBsForPoorConfig(ctx, clientset)
 				scanAllPDBsForMultiplePDBs(ctx, clientset)
+				scanAllPDBsForDisruptionBlocks(ctx, clientset)
 			case <-ctx.Done():
 				return
 			}
@@ -961,6 +1162,8 @@ func logAndFixPoorPDBConfig(
 			logErrorf("Failed to delete poor PDB %s/%s: %v\n", namespace, pdb.Name, err)
 			return
 		}
+		// Wait for the deletion to propagate before recreating to avoid an AlreadyExists race.
+		waitForPDBDeletion(ctx, clientset, namespace, pdb.Name)
 		// Recreate PDB using the default creation flow for the workload
 		createPDBForWorkload(ctx, clientset, workloadObj)
 	}
@@ -980,7 +1183,7 @@ func createPDBForWorkload(ctx context.Context, clientset kubernetes.Interface, o
 	switch workload := obj.(type) {
 	case *appsv1.Deployment:
 		replicas = workload.Spec.Replicas
-		if replicas == nil || *replicas < 2 {
+		if deleteCastaiPDBIfUnderReplicated(ctx, clientset, workload.Namespace, workload.Name, replicas) {
 			return
 		}
 		if workload.Annotations != nil {
@@ -1003,7 +1206,7 @@ func createPDBForWorkload(ctx context.Context, clientset kubernetes.Interface, o
 		logDebugf("Workload %s/%s is NOT excluded", namespace, name)
 	case *appsv1.StatefulSet:
 		replicas = workload.Spec.Replicas
-		if replicas == nil || *replicas < 2 {
+		if deleteCastaiPDBIfUnderReplicated(ctx, clientset, workload.Namespace, workload.Name, replicas) {
 			return
 		}
 		if workload.Annotations != nil {
@@ -1032,13 +1235,22 @@ func createPDBForWorkload(ctx context.Context, clientset kubernetes.Interface, o
 		return
 	}
 
-	if _, err := metav1.LabelSelectorAsSelector(selector); err != nil {
+	// Enrich selector with any additional label keys configured via ConfigMap, if present on pod template
+	defaultPDBConfigLock.RLock()
+	additionalSelectorLabels := defaultPDBConfig.AdditionalSelectorLabels
+	defaultPDBConfigLock.RUnlock()
+	selector = enrichSelectorWithAdditionalLabels(selector, podTemplateLabels, additionalSelectorLabels)
+
+	workloadSel, err := metav1.LabelSelectorAsSelector(selector)
+	if err != nil {
 		logWarnf("Invalid selector for %s/%s: %v\n", namespace, name, err)
 		return
 	}
 
 	pdbList, err := clientset.PolicyV1().PodDisruptionBudgets(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
+		// Fail closed: a transient list error must not cause us to invent a
+		// duplicate/conflicting PDB. The caller will retry on the next event.
 		logErrorf("Failed to list PDBs in namespace %s: %v\n", namespace, err)
 		return
 	}
@@ -1047,22 +1259,46 @@ func createPDBForWorkload(ctx context.Context, clientset kubernetes.Interface, o
 	logInterval := defaultPDBConfig.LogInterval
 	defaultPDBConfigLock.RUnlock()
 
-	// Check for existing PDBs and handle accordingly (coverage-based matching).
+	// Check for existing PDBs and handle accordingly.
+	//
+	// A PDB is considered to already "cover" this workload if its selector
+	// matches the workload's pod template labels — not only when the selector
+	// is written identically to the workload's own computed selector. This
+	// handles pre-existing PDBs (e.g. from Helm charts) that intentionally use
+	// a different, but still pod-matching, selector (such as a chart adding a
+	// `shard` label to disambiguate sibling deployments). Since every pod
+	// produced by this workload shares the same pod template labels, checking
+	// that one label set is equivalent to checking every live pod.
 	var existingCastaiPDB *policyv1.PodDisruptionBudget
+	var existingCastaiExact bool
 	var existingNonCastaiPDB *policyv1.PodDisruptionBudget
 	coveringPDBs := make([]*policyv1.PodDisruptionBudget, 0)
 	coveringNonControllerNames := make([]string, 0)
 
 	for i := range pdbList.Items {
 		pdb := &pdbList.Items[i]
-		covers, _ := pdbCoversPodTemplate(pdb, podTemplateLabels)
+		covers, pdbSel := pdbCoversPodTemplate(pdb, podTemplateLabels)
 		if !covers {
 			continue
 		}
 		coveringPDBs = append(coveringPDBs, pdb)
+		exact := pdbSel.String() == workloadSel.String()
+		// A match via non-identical selectors means this PDB's selector is a
+		// superset (or otherwise differently-shaped) match rather than an exact
+		// one. This is expected for e.g. Helm-managed PDBs, but is also the
+		// pattern that can cause an accidental cross-workload match if two
+		// sibling workloads share labels without a disambiguating key. Log it
+		// so operators have visibility into non-exact matches.
+		if !exact {
+			logWarnf("PDB %s/%s covers workload %s/%s via a non-identical selector (PDB selector: %q, workload selector: %q)\n",
+				namespace, pdb.Name, namespace, name, pdbSel.String(), workloadSel.String())
+		}
 		if isControllerOwnedPDB(pdb.Name) {
-			if existingCastaiPDB == nil {
+			// Prefer the first match; upgrade to an exact-match castai PDB if we
+			// later find one (deterministic vs last-list-item-wins).
+			if existingCastaiPDB == nil || (exact && !existingCastaiExact) {
 				existingCastaiPDB = pdb
+				existingCastaiExact = exact
 			}
 		} else {
 			if existingNonCastaiPDB == nil {
@@ -1089,9 +1325,26 @@ func createPDBForWorkload(ctx context.Context, clientset kubernetes.Interface, o
 		return
 	}
 
-	// If a castai PDB exists, update it
+	// If a castai PDB exists, update it (do not delete for unreadiness — log via scan).
 	if existingCastaiPDB != nil {
 		updateExistingPDB(ctx, clientset, existingCastaiPDB, workloadAnnotations, replicas, namespace, name, obj)
+		return
+	}
+
+	// New PDB only: require pods to be ready and available before creating.
+	// Unready multi-replica workloads (e.g. crash-looping) would get a PDB that
+	// can sit at disruptionsAllowed=0 and block node drains; skip and log instead.
+	if desired, ready, available, ok := workloadReplicaHealth(obj); ok && !workloadReadyForNewPDB(desired, ready, available) {
+		key := fmt.Sprintf("%s/%s/not-ready", namespace, name)
+		now := time.Now()
+		skipLogTimesLock.Lock()
+		last, seen := skipLogTimes[key]
+		if !seen || now.Sub(last) > logInterval {
+			logWarnf("Skipping PDB creation for %s/%s: workload not ready (ready=%d/%d, available=%d/%d) — creating a PDB now may block drains while pods are unhealthy",
+				namespace, name, ready, desired, available, desired)
+			skipLogTimes[key] = now
+		}
+		skipLogTimesLock.Unlock()
 		return
 	}
 
@@ -1171,39 +1424,65 @@ func createPDBForWorkload(ctx context.Context, clientset kubernetes.Interface, o
 	pdbSpec.UnhealthyPodEvictionPolicy = resolveUnhealthyPodEvictionPolicy(workloadAnnotations)
 
 	if exists {
-		needsUpdate := false
-		if existingPDB.Spec.MinAvailable == nil && pdbSpec.MinAvailable != nil {
-			needsUpdate = true
-		} else if existingPDB.Spec.MinAvailable != nil && pdbSpec.MinAvailable == nil {
-			needsUpdate = true
-		} else if existingPDB.Spec.MinAvailable != nil && pdbSpec.MinAvailable != nil &&
-			existingPDB.Spec.MinAvailable.String() != pdbSpec.MinAvailable.String() {
-			needsUpdate = true
-		}
-		if existingPDB.Spec.MaxUnavailable == nil && pdbSpec.MaxUnavailable != nil {
-			needsUpdate = true
-		} else if existingPDB.Spec.MaxUnavailable != nil && pdbSpec.MaxUnavailable == nil {
-			needsUpdate = true
-		} else if existingPDB.Spec.MaxUnavailable != nil && pdbSpec.MaxUnavailable != nil &&
-			existingPDB.Spec.MaxUnavailable.String() != pdbSpec.MaxUnavailable.String() {
-			needsUpdate = true
-		}
-		if !unhealthyPodEvictionPoliciesEqual(existingPDB.Spec.UnhealthyPodEvictionPolicy, pdbSpec.UnhealthyPodEvictionPolicy) {
-			needsUpdate = true
-		}
-		if needsUpdate {
-			existingPDB.Spec = pdbSpec
-			_, err := clientset.PolicyV1().PodDisruptionBudgets(namespace).Update(ctx, existingPDB, metav1.UpdateOptions{})
+		// PDB selectors are immutable; if the enriched selector differs from the existing one,
+		// we must delete the old PDB before recreating. Kubernetes deletion is asynchronous,
+		// so we briefly wait for the delete to propagate before falling through to Create.
+		// If the wait is insufficient (rare), Create returns AlreadyExists and recreation is
+		// deferred to the next reconcile loop.
+		if existingPDB.Spec.Selector != nil {
+			existingSel, err := metav1.LabelSelectorAsSelector(existingPDB.Spec.Selector)
 			if err != nil {
-				logErrorf("Failed to update PDB for %s/%s: %v\n", namespace, name, err)
+				logErrorf("Failed to parse existing PDB selector for %s/%s: %v\n", namespace, pdbName, err)
+				return
+			}
+			newSel, err := metav1.LabelSelectorAsSelector(pdbSpec.Selector)
+			if err != nil {
+				logErrorf("Failed to parse new PDB selector for %s/%s: %v\n", namespace, pdbName, err)
+				return
+			}
+			if existingSel.String() != newSel.String() {
+				logInfof("Selector changed for PDB %s/%s (was %q, now %q); deleting to recreate\n",
+					namespace, pdbName, existingSel.String(), newSel.String())
+				if delErr := clientset.PolicyV1().PodDisruptionBudgets(namespace).Delete(ctx, pdbName, metav1.DeleteOptions{}); delErr != nil && !apierrors.IsNotFound(delErr) {
+					logErrorf("Failed to delete PDB %s/%s for selector change: %v\n", namespace, pdbName, delErr)
+					return
+				}
+
+				// Brief wait for the deletion to propagate; ctx-aware so shutdowns aren't blocked.
+				waitForPDBDeletion(ctx, clientset, namespace, pdbName)
+				// Fall through to the create block below
 			} else {
-				logInfof("Updated PDB for %s/%s\n", namespace, name)
-				if replicas != nil {
-					logAndFixPoorPDBConfig(ctx, clientset, existingPDB, name, *replicas, namespace, obj)
+				needsUpdate := pdbSpecNeedsUpdate(&existingPDB.Spec, &pdbSpec)
+				if needsUpdate {
+					existingPDB.Spec = pdbSpec
+					_, err := clientset.PolicyV1().PodDisruptionBudgets(namespace).Update(ctx, existingPDB, metav1.UpdateOptions{})
+					if err != nil {
+						logErrorf("Failed to update PDB for %s/%s: %v\n", namespace, name, err)
+					} else {
+						logInfof("Updated PDB for %s/%s\n", namespace, name)
+						if replicas != nil {
+							logAndFixPoorPDBConfig(ctx, clientset, existingPDB, name, *replicas, namespace, obj)
+						}
+					}
+				}
+				return
+			}
+		} else {
+			needsUpdate := pdbSpecNeedsUpdate(&existingPDB.Spec, &pdbSpec)
+			if needsUpdate {
+				existingPDB.Spec = pdbSpec
+				_, err := clientset.PolicyV1().PodDisruptionBudgets(namespace).Update(ctx, existingPDB, metav1.UpdateOptions{})
+				if err != nil {
+					logErrorf("Failed to update PDB for %s/%s: %v\n", namespace, name, err)
+				} else {
+					logInfof("Updated PDB for %s/%s\n", namespace, name)
+					if replicas != nil {
+						logAndFixPoorPDBConfig(ctx, clientset, existingPDB, name, *replicas, namespace, obj)
+					}
 				}
 			}
+			return
 		}
-		return
 	}
 
 	pdb := &policyv1.PodDisruptionBudget{
@@ -1316,23 +1595,39 @@ func deletePDBForWorkload(ctx context.Context, clientset *kubernetes.Clientset, 
 	}
 }
 
-// Deletes orphaned PodDisruptionBudgets that no longer have an associated Deployment or StatefulSet.
-func garbageCollectOrphanedPDBs(ctx context.Context, clientset *kubernetes.Clientset) {
+// Deletes orphaned PodDisruptionBudgets that no longer have an associated Deployment or StatefulSet,
+// and PodDisruptionBudgets whose workload still exists but has dropped below 2 replicas. The latter
+// case is a self-healing safety net: a live watch event normally deletes the PDB the moment a workload
+// scales down, but if that event is ever missed (controller restart, leader-election gap, etc.) the PDB
+// would otherwise persist indefinitely with 0 allowed disruptions, blocking node drains/rotations.
+func garbageCollectOrphanedPDBs(ctx context.Context, clientset kubernetes.Interface) {
 	pdbs, err := clientset.PolicyV1().PodDisruptionBudgets("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		logErrorf("Failed to list PDBs: %v", err)
 		return
 	}
 
-	for _, pdb := range pdbs.Items {
+	for i := range pdbs.Items {
+		pdb := &pdbs.Items[i]
 		if !strings.HasPrefix(pdb.Name, "castai-") || !strings.HasSuffix(pdb.Name, "-pdb") {
 			continue
 		}
 		workloadName := strings.TrimSuffix(strings.TrimPrefix(pdb.Name, "castai-"), "-pdb")
 
 		// Check for existence of Deployment and StatefulSet
-		_, errDep := clientset.AppsV1().Deployments(pdb.Namespace).Get(ctx, workloadName, metav1.GetOptions{})
-		_, errSts := clientset.AppsV1().StatefulSets(pdb.Namespace).Get(ctx, workloadName, metav1.GetOptions{})
+		deploy, errDep := clientset.AppsV1().Deployments(pdb.Namespace).Get(ctx, workloadName, metav1.GetOptions{})
+		sts, errSts := clientset.AppsV1().StatefulSets(pdb.Namespace).Get(ctx, workloadName, metav1.GetOptions{})
+
+		// Transient API errors (timeout, RBAC, etc.) must not be treated as
+		// "under-replicated" — that would delete PDBs that should be kept.
+		if errDep != nil && !apierrors.IsNotFound(errDep) {
+			logErrorf("Failed to get Deployment %s/%s while GC'ing PDB %s: %v", pdb.Namespace, workloadName, pdb.Name, errDep)
+			continue
+		}
+		if errSts != nil && !apierrors.IsNotFound(errSts) {
+			logErrorf("Failed to get StatefulSet %s/%s while GC'ing PDB %s: %v", pdb.Namespace, workloadName, pdb.Name, errSts)
+			continue
+		}
 
 		if apierrors.IsNotFound(errDep) && apierrors.IsNotFound(errSts) {
 			err := clientset.PolicyV1().PodDisruptionBudgets(pdb.Namespace).Delete(ctx, pdb.Name, metav1.DeleteOptions{})
@@ -1344,6 +1639,28 @@ func garbageCollectOrphanedPDBs(ctx context.Context, clientset *kubernetes.Clien
 				}
 			} else {
 				logInfof("Garbage collected orphaned PDB %s/%s", pdb.Namespace, pdb.Name)
+			}
+			continue
+		}
+
+		// Workload still exists: check whether it has fewer than 2 replicas. If so, the PDB
+		// should not exist (see deleteCastaiPDBIfUnderReplicated) regardless of how it got here.
+		var replicas *int32
+		if errDep == nil {
+			replicas = deploy.Spec.Replicas
+		} else {
+			replicas = sts.Spec.Replicas
+		}
+		if replicas == nil || *replicas < 2 {
+			err := clientset.PolicyV1().PodDisruptionBudgets(pdb.Namespace).Delete(ctx, pdb.Name, metav1.DeleteOptions{})
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					logInfof("Under-replicated PDB %s/%s already deleted", pdb.Namespace, pdb.Name)
+				} else {
+					logErrorf("Failed to garbage collect under-replicated PDB %s/%s: %v", pdb.Namespace, pdb.Name, err)
+				}
+			} else {
+				logInfof("Garbage collected PDB %s/%s: workload %s has fewer than 2 replicas", pdb.Namespace, pdb.Name, workloadName)
 			}
 		}
 	}
@@ -1403,29 +1720,32 @@ func reconcileAllDefaultPDBs(ctx context.Context, clientset *kubernetes.Clientse
 }
 
 // workloadHasExistingPDB checks if a workload already has an existing PDB
-func workloadHasExistingPDB(ctx context.Context, clientset *kubernetes.Clientset, obj interface{}) bool {
+func workloadHasExistingPDB(ctx context.Context, clientset kubernetes.Interface, obj interface{}) bool {
 	var selector *metav1.LabelSelector
 	var namespace, name string
-	var labels map[string]string
+	var workloadLabels map[string]string
+	var podTemplateLabels map[string]string
 
 	switch workload := obj.(type) {
 	case *appsv1.Deployment:
 		selector = workload.Spec.Selector
 		namespace = workload.Namespace
 		name = workload.Name
-		labels = workload.Labels
+		workloadLabels = workload.Labels
+		podTemplateLabels = workload.Spec.Template.Labels
 	case *appsv1.StatefulSet:
 		selector = workload.Spec.Selector
 		namespace = workload.Namespace
 		name = workload.Name
-		labels = workload.Labels
+		workloadLabels = workload.Labels
+		podTemplateLabels = workload.Spec.Template.Labels
 	default:
 		return false
 	}
 
 	// Check if workload should be excluded
 	logDebugf("Reconciliation: Checking exclusions for %s/%s", namespace, name)
-	if isWorkloadExcluded(namespace, name, labels) {
+	if isWorkloadExcluded(namespace, name, workloadLabels) {
 		logInfof("Reconciliation: Workload %s/%s is excluded, skipping PDB creation", namespace, name)
 		return true
 	}
@@ -1435,21 +1755,24 @@ func workloadHasExistingPDB(ctx context.Context, clientset *kubernetes.Clientset
 		return false
 	}
 
-	workloadSel, err := metav1.LabelSelectorAsSelector(selector)
-	if err != nil {
+	// Validate the workload selector; coverage is checked against pod template labels below.
+	if _, err := metav1.LabelSelectorAsSelector(selector); err != nil {
 		return false
 	}
 
-	// Check for existing PDBs that match this workload's selector
+	// Check for existing PDBs that cover this workload's pods
 	pdbList, err := clientset.PolicyV1().PodDisruptionBudgets(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return false
+		// Fail closed: treat as "already covered" so a transient list error does not
+		// cause createPDBForWorkload to invent a conflicting/duplicate PDB.
+		logWarnf("Reconciliation: failed to list PDBs for workload %s/%s: %v; skipping creation", namespace, name, err)
+		return true
 	}
 
-	for _, pdb := range pdbList.Items {
+	for i := range pdbList.Items {
+		pdb := &pdbList.Items[i]
 		if pdb.Spec.Selector != nil {
-			pdbSel, err := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
-			if err == nil && workloadSel.String() == pdbSel.String() {
+			if covers, _ := pdbCoversPodTemplate(pdb, podTemplateLabels); covers {
 				logInfof("Reconciliation: Found existing PDB %s for workload %s/%s, skipping creation", pdb.Name, namespace, name)
 				return true
 			}
@@ -1581,6 +1904,73 @@ func isPoorPDBConfig(pdb *policyv1.PodDisruptionBudget, replicas int32) bool {
 		}
 	}
 	return false
+}
+
+// scanAllPDBsForDisruptionBlocks rate-limited-warns when a controller-owned PDB
+// has DisruptionsAllowed==0 with populated status. This surfaces stuck budgets
+// (e.g. crash-looping workloads under IfHealthyBudget) without deleting PDBs.
+func scanAllPDBsForDisruptionBlocks(ctx context.Context, clientset kubernetes.Interface) {
+	pdbs, err := clientset.PolicyV1().PodDisruptionBudgets("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		logErrorf("Failed to list PDBs for disruption-block scan: %v", err)
+		return
+	}
+
+	defaultPDBConfigLock.RLock()
+	logInterval := defaultPDBConfig.LogInterval
+	defaultPDBConfigLock.RUnlock()
+	if logInterval <= 0 {
+		logInterval = defaultLogInterval
+	}
+
+	now := time.Now()
+	seen := make(map[string]struct{})
+
+	for i := range pdbs.Items {
+		pdb := &pdbs.Items[i]
+		if !isControllerOwnedPDB(pdb.Name) {
+			continue
+		}
+		key := pdb.Namespace + "/" + pdb.Name
+		seen[key] = struct{}{}
+
+		// Empty/zero status is normal right after create; only warn once the
+		// disruption controller has populated ExpectedPods / DesiredHealthy.
+		statusPopulated := pdb.Status.ExpectedPods > 0 || pdb.Status.DesiredHealthy > 0
+		if !statusPopulated || pdb.Status.DisruptionsAllowed > 0 {
+			disruptionBlockedSinceLock.Lock()
+			delete(disruptionBlockedSince, key)
+			disruptionBlockedSinceLock.Unlock()
+			continue
+		}
+
+		disruptionBlockedSinceLock.Lock()
+		since, ok := disruptionBlockedSince[key]
+		if !ok {
+			disruptionBlockedSince[key] = now
+			since = now
+		}
+		disruptionBlockedSinceLock.Unlock()
+
+		warnKey := key + "/disruptions-blocked"
+		warnLogTimesLock.Lock()
+		last, logged := warnLogTimes[warnKey]
+		if !logged || now.Sub(last) > logInterval {
+			logWarnf("WARNING: PDB %s has disruptionsAllowed=0 for %s (currentHealthy=%d, desiredHealthy=%d, expectedPods=%d) — this can block node drains when pods are NotReady under IfHealthyBudget",
+				key, now.Sub(since).Round(time.Second), pdb.Status.CurrentHealthy, pdb.Status.DesiredHealthy, pdb.Status.ExpectedPods)
+			warnLogTimes[warnKey] = now
+		}
+		warnLogTimesLock.Unlock()
+	}
+
+	// Drop tracking for PDBs that no longer exist.
+	disruptionBlockedSinceLock.Lock()
+	for key := range disruptionBlockedSince {
+		if _, ok := seen[key]; !ok {
+			delete(disruptionBlockedSince, key)
+		}
+	}
+	disruptionBlockedSinceLock.Unlock()
 }
 
 // Scans for workloads targeted by multiple PDBs and removes redundant castai PDBs if necessary.

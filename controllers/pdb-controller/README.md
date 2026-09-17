@@ -31,7 +31,7 @@ This controller enables safe, automated disruption management with per-workload 
   Configure regex-based exclusion rules to automatically skip PDB creation for specific workloads based on namespace, name, and label patterns. Useful for system workloads, temporary deployments, or critical services.
 
 - **Garbage Collection:**
-  Orphaned PDBs are cleaned up when workloads are deleted or change state.
+  Orphaned PDBs are cleaned up when workloads are deleted. PDBs are also cleaned up when their workload still exists but has scaled down to fewer than 2 replicas — this runs periodically as a safety net in case a live scale-down event was ever missed (e.g. due to a controller restart or leader-election gap), preventing a stale PDB from blocking node drains/rotations indefinitely.
 
 - **CAST Component Leftover Cleanup:**
   On reconcile and during the periodic multi-PDB scan, if a CAST Helm-style PDB (`castai-*` without the `-pdb` suffix) already covers a workload and a leftover controller-owned `castai-*-pdb` also covers it, the controller deletes only the leftover controller PDB. Customer `castai-*-pdb` objects covered solely by unrelated Helm PDBs are left alone so controller-managed customer workloads stay intact.
@@ -39,7 +39,22 @@ This controller enables safe, automated disruption management with per-workload 
 - **Leader Election:**
   Supports safe, highly available operation in multi-replica controller deployments.
 
-- **Configurable log levels:**  
+- **Additional PDB Selector Labels:**
+  Optionally extend PDB `matchLabels` with extra labels drawn from each workload's pod template. Configure a list of label keys in the ConfigMap and the controller will add them to the PDB selector when they are present on the pod template — silently skipping any keys that are absent.
+
+- **Coverage-Based Existing-PDB Detection:**  
+  The controller recognizes a pre-existing PDB as already covering a workload whenever that PDB's selector matches the workload's pod template labels, even if the PDB's selector isn't written identically to the one the controller would generate. This avoids duplicate PDBs for workloads whose Helm chart (or other owner) manages a PDB with a differently-shaped but still-matching selector. When a match is found via a non-identical selector, the controller logs a `warn`-level message so operators can spot selectors that may need a disambiguating label.
+
+- **Controller-Owned PDB Naming Convention:**  
+  The controller only treats a matching PDB as its own (safe to update to match its own config) when the PDB's name both starts with `castai-` **and** ends with `-pdb` — the exact pattern it uses when generating PDBs (`castai-<workload>-pdb`). Any other matching PDB, including ones from Helm charts whose release name happens to start with `castai-` (e.g. `castai-agent`, `castai-cluster-controller`, `castai-pod-mutator`), is treated as externally managed: the controller leaves it untouched and skips creating its own.
+
+- **New-PDB readiness gate:**  
+  After the multi-replica check (`>= 2`), the controller only **creates** a new castai PDB when the workload is fully ready and available (`ReadyReplicas` and `AvailableReplicas` both `>=` desired; StatefulSets use ready only). If pods are not ready yet (cold start, crash-loop, mid-rollout), creation is skipped and a warning is logged. Existing controller PDBs are **not** deleted for unreadiness.
+
+- **Disruption-block warnings:**  
+  The periodic scan warns (rate-limited) when a controller-owned PDB has `disruptionsAllowed=0` with populated status (`currentHealthy` / `desiredHealthy` / `expectedPods` and how long it has been stuck). This surfaces drain-blocking budgets without removing the PDB. Operators who want NotReady pods to remain evictable can still set the optional `defaultUnhealthyPodEvictionPolicy` / annotation overrides (`AlwaysAllow`); those are not enabled by default.
+
+- **Configurable log levels:**
   Set `logLevel` in the `castai-pdb-controller-config` ConfigMap to `debug`, `info`, `warn`, or `error` (default `info`) to control how much the controller writes to stderr.
 
 ---
@@ -242,7 +257,9 @@ spec:
 - **Duplicate logs:**  
   Usually caused by log collector configuration, not the controller itself.
 - **No PDB created:**  
-  Ensure your workload has at least 2 replicas and is not opted out with the bypass annotation.
+  Ensure your workload has at least 2 replicas, those replicas are ready/available, and the workload is not opted out with the bypass annotation. Check controller logs for `workload not ready` skip messages.
+- **PDB reports disruptionsAllowed=0:**  
+  Look for `disruptionsAllowed=0` warnings from the controller. The controller does not delete existing PDBs for this reason; fix the workload health or adjust PDB/`unhealthyPodEvictionPolicy` overrides intentionally.
 - **RBAC errors:**  
   Make sure your controller has permissions to list namespaces and manage PDBs.
 
