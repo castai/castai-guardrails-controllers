@@ -58,6 +58,9 @@ TSC_CERT_MANAGER_ISSUER_REF_KIND="${TSC_CERT_MANAGER_ISSUER_REF_KIND:-ClusterIss
 TSC_MANUAL_TLS_ENABLED="${TSC_MANUAL_TLS_ENABLED:-false}"
 TSC_MANUAL_TLS_SECRET_NAME="${TSC_MANUAL_TLS_SECRET_NAME:-}"
 JVM_IMAGE_TAG_OVERRIDE="${JVM_IMAGE_TAG:-}"
+# JVM is a Pod-mutating admission webhook. Set to "false" to install the
+# controller without registering the webhook (no Pod mutations).
+JVM_WEBHOOK_ENABLED="${JVM_WEBHOOK_ENABLED:-true}"
 PDB_IMAGE_TAG_OVERRIDE="${PDB_IMAGE_TAG:-}"
 
 # -------------------------
@@ -512,7 +515,7 @@ if [ "$IS_INTERACTIVE" = true ]; then
   echo "  Namespace : ${NAMESPACE}"
   echo "  Cluster   : ${CLUSTER_NAME}"
   [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_IMAGE_TAG_OVERRIDE:-$TSC_TAG_DEFAULT}  mode=${TSC_MODE}  webhook=${TSC_WEBHOOK_ENABLED}  cert-manager=${TSC_CERT_MANAGER_ENABLED}  manualTLS=${TSC_MANUAL_TLS_ENABLED}"
-  [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-$JVM_TAG_DEFAULT}  (webhook, apply)"
+  [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-$JVM_TAG_DEFAULT}  webhook=${JVM_WEBHOOK_ENABLED}"
   [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_IMAGE_TAG_OVERRIDE:-$PDB_TAG_DEFAULT}  FixPoorPDBs=true (live)"
   echo ""
 
@@ -637,6 +640,7 @@ install_chart() {
       # JVM is a Pod-mutating admission webhook; behaviour is governed by
       # Helm values (webhook.enabled, webhook.failurePolicy, certManager.enabled,
       # ...) rather than a runtime management mode.
+      args+=(--set webhook.enabled="$JVM_WEBHOOK_ENABLED")
       ;;
     PDB)
       # PDB has no mode toggle. FixPoorPDBs is enabled by default so the
@@ -772,9 +776,16 @@ if [ "$INSTALL_TSC" = true ]; then
   echo ""
 fi
 if [ "$INSTALL_JVM" = true ]; then
-  step "The JVM controller is a Pod-mutating admission webhook; it has no runtime"
-  step "mode toggle. Configure it via Helm values (webhook.enabled,"
-  step "webhook.failurePolicy, certManager.enabled, ...) on the JVM chart."
+  step "The JVM controller is a Pod-mutating admission webhook."
+  if [ "$JVM_WEBHOOK_ENABLED" = true ]; then
+    step "To disable the webhook (stop mutating Pods) without uninstalling:"
+    echo "    helm upgrade castai-jvm-probe-controller ${JVM_CHART} -n ${NAMESPACE} --set webhook.enabled=false"
+  else
+    step "The webhook is currently disabled. To re-enable mutations:"
+    echo "    helm upgrade castai-jvm-probe-controller ${JVM_CHART} -n ${NAMESPACE} --set webhook.enabled=true"
+  fi
+  step "Other webhook settings (failurePolicy, certManager, namespaceSelector, ...)"
+  step "can be changed with the same helm upgrade command on the JVM chart."
   echo ""
 fi
 echo ""
