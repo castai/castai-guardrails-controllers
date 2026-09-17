@@ -4,19 +4,19 @@
 >
 > This repository is **open-source software** and is **not part of the CAST AI product** or a CAST AI commercial offering. It was built by engineers to close real-world reliability gaps — the kind that usually show up when workloads are created quickly, without Kubernetes best practices fully in place.
 >
-> Because TSC and PDB mutate live workloads, your deployment strategy matters: if a workload uses `Recreate` instead of `RollingUpdate`, enabling remediation may cause the workload to recycle. For TSC, review your rollout settings and start in **recommend** mode (snapshot-only) before switching to **apply** mode. The JVM Probe Controller runs as a Pod admission webhook and does not modify workload specs.
+> TSC and JVM run as **Pod mutating admission webhooks**: they inject `topologySpreadConstraints` and JVM health probes at Pod creation time, without modifying Deployment or StatefulSet specs. PDB manages `PodDisruptionBudget` resources and does not modify workload specs either. Because mutations take effect when Pods are created, your rollout strategy matters: a workload using `Recreate` will recycle when a rollout triggers new Pods. For TSC, start in **recommend** mode (snapshot-only) before switching to **apply** mode.
 
-Three Kubernetes controllers that **automatically remediate workload configuration** in any cluster. They watch your Deployments and StatefulSets and fix common reliability gaps — missing Pod Disruption Budgets, missing Topology Spread Constraints, and missing/misconfigured JVM health probes — so workloads are spread safely, drain cleanly, and start healthily.
+Three Kubernetes controllers that **automatically remediate workload configuration** in any cluster. **TSC and JVM** run as **Pod mutating admission webhooks** and inject missing `topologySpreadConstraints` and JVM health probes when Pods are created. **PDB** watches Deployments and StatefulSets and manages `PodDisruptionBudget`s. Together they help workloads spread safely, drain cleanly, and start healthily — without modifying parent workload specs.
 
 | Controller | What it fixes | Default mode |
 |---|---|---|
-| **TSC Controller** | Missing `topologySpreadConstraints` | **Recommend** (snapshot-only) |
+| **TSC Controller** | Missing `topologySpreadConstraints` (via Pod admission webhook) | **Recommend** (snapshot-only) |
 | **JVM Probe Controller** | Missing JVM **startup** probes (via Pod admission webhook) | **Apply** (mutating webhook) |
 | **PDB Controller** | Missing/poor `PodDisruptionBudget`s | **Live** (`FixPoorPDBs=true`) |
 
-> **JVM Probe Controller architecture change:** It now runs as a **Pod mutating admission webhook**. It copies each workload's existing liveness/readiness probe into a startup probe at Pod creation time, preserving the original handler (`httpGet`, `tcpSocket`, `exec`, or `grpc`). This makes it fully compatible with GitOps/ArgoCD because it does not modify Deployment or StatefulSet specs.
+> **Admission webhook architecture:** TSC and JVM no longer patch Deployments or StatefulSets. They run as **Pod mutating admission webhooks**, injecting `topologySpreadConstraints` and JVM startup probes at Pod creation time. This means changes take effect at the **Pod level**, making the controllers fully compatible with GitOps/ArgoCD because the parent workload specs remain unchanged.
 
-TSC and PDB follow the [castai-pdb-controller](https://github.com/castai/castai-pdb-controller) pattern: leader election, shared informers, rate-limited logging, ConfigMap-driven config with hot-reload, and strategic-merge-patch (non-destructive) updates. The JVM Probe Controller uses a mutating admission webhook instead of strategic-merge patching so it never modifies the parent workload resource.
+PDB follows the [castai-pdb-controller](https://github.com/castai/castai-pdb-controller) pattern: leader election, shared informers, rate-limited logging, ConfigMap-driven config with hot-reload, and strategic-merge-patch (non-destructive) updates to `PodDisruptionBudget` resources. TSC and JVM run as **mutating admission webhooks**: they receive Pod CREATE requests from the API server and return JSON Patches, so they never modify the parent Deployment or StatefulSet resource.
 
 ---
 
@@ -84,12 +84,17 @@ INSTALL_TSC=true INSTALL_PDB=true ./install.sh
 
 # Override image tag (defaults to each chart's appVersion) and TSC mode
 INSTALL_TSC=true INSTALL_JVM=true TSC_IMAGE_TAG=v1.2.3 TSC_MODE=apply ./install.sh
+
+# Install JVM with the mutating admission webhook disabled
+INSTALL_JVM=true JVM_WEBHOOK_ENABLED=false ./install.sh
 ```
 
 | Env var | Purpose | Default |
 |---|---|---|
 | `INSTALL_TSC` / `INSTALL_JVM` / `INSTALL_PDB` | Select controllers (non-interactive) | unset |
-| `TSC_MODE` | TSC mode: `apply` (mutate) or `recommend` (snapshot-only) | `recommend` |
+| `TSC_MODE` | TSC mode: `apply` (mutate Pods) or `recommend` (snapshot-only) | `recommend` |
+| `TSC_WEBHOOK_ENABLED` | Register the TSC Pod admission webhook (`true`/`false`) | `true` |
+| `JVM_WEBHOOK_ENABLED` | Register the JVM Pod admission webhook (`true`/`false`) | `true` |
 | `TSC_IMAGE_TAG` / `JVM_IMAGE_TAG` / `PDB_IMAGE_TAG` | Override image tag | chart `appVersion` |
 | `NAMESPACE` | Target namespace | `castai-agent` |
 | `IMAGE_PULL_POLICY` | Container image pull policy | `IfNotPresent` |
@@ -122,10 +127,10 @@ kubectl logs -n castai-agent -l app.kubernetes.io/name=castai-pdb-controller    
 
 ### Controller modes — TSC
 
-TSC installs in **recommend** mode by default. In this mode the controller captures snapshots of your workloads but does **not** mutate them. To make it actually patch workloads, switch to **apply** mode by patching its ConfigMap — the controller hot-reloads the ConfigMap, so **no restart is needed**:
+TSC installs in **recommend** mode by default. In this mode the controller captures snapshots of your workloads but does **not** mutate Pods. To make it actually inject `topologySpreadConstraints`, switch to **apply** mode by patching its ConfigMap — the controller hot-reloads the ConfigMap, so **no restart is needed**:
 
 ```bash
-# Enable apply mode (mutate workloads)
+# Enable apply mode (mutate Pods)
 kubectl -n castai-agent patch cm castai-tsc-controller-config \
   --type merge -p '{"data":{"managementEnabled":"true","rollbackOnDisable":"false","mode":"apply"}}'
 ```
@@ -167,6 +172,32 @@ helm upgrade castai-pdb-controller \
   -n castai-agent --set config.FixPoorPDBs="true"
 ```
 
+### Controller modes — JVM Probe Controller
+
+The JVM Probe Controller installs as a **Pod mutating admission webhook** and is enabled by default. It has no ConfigMap mode toggle; instead, you enable or disable mutations by registering or unregistering the webhook.
+
+To disable the webhook (stop mutating Pods) without uninstalling the controller:
+
+```bash
+helm upgrade castai-jvm-probe-controller \
+  ./controllers/jvm-probe-controller/helm/castai-jvm-probe-controller \
+  -n castai-agent --set webhook.enabled=false
+```
+
+To re-enable it:
+
+```bash
+helm upgrade castai-jvm-probe-controller \
+  ./controllers/jvm-probe-controller/helm/castai-jvm-probe-controller \
+  -n castai-agent --set webhook.enabled=true
+```
+
+You can also install with the webhook disabled from the start:
+
+```bash
+INSTALL_JVM=true JVM_WEBHOOK_ENABLED=false ./install.sh
+```
+
 ### Bypass a single workload (opt out per workload)
 
 Add the relevant annotation to a Deployment or StatefulSet:
@@ -185,13 +216,14 @@ metadata:
 
 ### 1. TSC Controller (`tsc-controller`)
 
-**What it does:** automatically injects `topologySpreadConstraints` into Deployments and StatefulSets that are missing them, so pods spread across zones and nodes for high availability.
+**What it does:** runs as a **Pod mutating admission webhook**. It injects `topologySpreadConstraints` into Pods created from Deployments and StatefulSets that are missing them, so pods spread across zones and nodes for high availability.
 
 **Features**
+- Pod CREATE admission webhook
 - Zone-based spreading by default (`topology.kubernetes.io/zone`)
 - Annotation-based overrides per workload
 - Regex-based exclusion rules via ConfigMap
-- Garbage collection removes TSC when replicas drop below 2
+- Skips single-replica workloads
 - Leader election for HA
 - Rate-limited logging
 
@@ -200,7 +232,7 @@ metadata:
 | Key | Description | Default |
 |---|---|---|
 | `management.enabled` | Enable management (snapshot/rollback) | `true` |
-| `management.mode` | `apply` (mutate workloads) or `recommend` (snapshot only) | `recommend` |
+| `management.mode` | `apply` (mutate Pods) or `recommend` (snapshot only) | `recommend` |
 | `management.rollbackOnDisable` | Roll back controller changes when management is disabled | `false` |
 | `config.defaultConstraints` | Default TSC: `maxSkew`, `topologyKey`, `whenUnsatisfiable` | zone / maxSkew 1 / DoNotSchedule |
 | `config.skipSingleReplica` | Skip workloads with <2 replicas | `true` |
@@ -208,6 +240,9 @@ metadata:
 | `config.reconcileInterval` | Reconcile loop interval | `2m` |
 | `config.garbageCollectInterval` | GC interval | `5m` |
 | `config.exclusions` | Regex rules (namespace/name) to skip | `[]` |
+| `webhook.enabled` | Register the Pod admission webhook | `true` |
+| `webhook.failurePolicy` | `Ignore` or `Fail` | `Ignore` |
+| `certManager.enabled` | Use cert-manager for webhook TLS | `false` |
 
 Rendered ConfigMap: `castai-tsc-controller-config`, keys `managementEnabled`, `mode`, `rollbackOnDisable`.
 
@@ -234,7 +269,10 @@ spec:
   # ...
 ```
 
-Verify: `kubectl get deploy my-app -o jsonpath='{.spec.template.spec.topologySpreadConstraints}'`
+Verify on a running Pod:
+```bash
+kubectl get pod -l app=my-app -o jsonpath='{.items[0].spec.topologySpreadConstraints}'
+```
 
 ---
 
@@ -247,6 +285,8 @@ Verify: `kubectl get deploy my-app -o jsonpath='{.spec.template.spec.topologySpr
 - Detection via image name (word-boundary regex), env vars (`JAVA_HOME`, `SPRING_PROFILES_ACTIVE`, `JAVA_TOOL_OPTIONS`), and container command
 - **Startup probe injected** for JVM containers by copying the existing liveness/readiness probe
 - **Handler-type preservation** — `httpGet`, `tcpSocket`, `exec`, and `grpc` probes are copied unchanged
+- **Named-port fallback** — HTTP/TCP probes prefer named container ports (`http`, `web`, `https`, `http-web`) so they survive container port-number changes
+- **Automatic probe alignment** (opt-in) — when a startup probe is injected, removes redundant `initialDelaySeconds` from liveness/readiness and extends `failureThreshold` to cover the configured startup window
 - **Autonomous per-Pod mutation** — each Pod gets a startup probe tailored to its own probe configuration
 - Force-overwrite existing probes (per-probe or all)
 - Liveness/readiness **opt-in** injection when missing
@@ -284,6 +324,8 @@ Verify: `kubectl get deploy my-app -o jsonpath='{.spec.template.spec.topologySpr
 
 Rendered ConfigMap: `castai-jvm-probe-controller-config`.
 
+> **Probe alignment (opt-in).** Set ConfigMap key `jvm-alignProbes: "true"` to align liveness/readiness probes when a startup probe is injected: `initialDelaySeconds` is removed and `failureThreshold` is extended so `periodSeconds * failureThreshold` covers at least `jvm-minProbeWindowSeconds` (default `60`), capped at `jvm-maxFailureThreshold` (default `10`).
+
 **Annotations** (on the Pod template)
 
 | Annotation | Description | Example |
@@ -295,6 +337,7 @@ Rendered ConfigMap: `castai-jvm-probe-controller-config`.
 | `workloads.cast.ai/jvm-probe-startup-period` | Startup probe period seconds | `"15"` |
 | `workloads.cast.ai/jvm-probe-startup-failure-threshold` | Startup probe failure threshold | `"40"` |
 | `workloads.cast.ai/jvm-probe-clear-delays` | Remove liveness/readiness `initialDelaySeconds` | `"true"` |
+| `workloads.cast.ai/jvm-probe-align` | Enable automatic liveness/readiness probe alignment | `"true"`/`"false"` |
 | `workloads.cast.ai/jvm-probe-overwrite-all` | Force overwrite all probes | `"true"` |
 | `workloads.cast.ai/jvm-probe-overwrite-liveness` | Overwrite liveness | `"true"` |
 | `workloads.cast.ai/jvm-probe-overwrite-readiness` | Overwrite readiness | `"true"` |
@@ -311,6 +354,8 @@ For each JVM container in a new Pod:
 2. Else if a readiness probe exists, copy it to `startupProbe`.
 3. Else if startup injection is enabled, build a startup probe from the detected framework defaults.
 4. Tune the startup probe: remove `initialDelaySeconds`, set `periodSeconds=15`, `failureThreshold=40`, `successThreshold=1`.
+5. Named-port fallback: if the copied probe is `httpGet`/`tcpSocket` and the container exposes a named port (`http`, `web`, `https`, or `http-web`), use the port name so the probe survives container port-number changes.
+6. If probe alignment is enabled, remove `initialDelaySeconds` from liveness/readiness and extend `failureThreshold` so `periodSeconds * failureThreshold` covers the configured startup window.
 
 Because the startup probe is a copy, the original handler (`httpGet`, `tcpSocket`, `exec`, or `grpc`) and path/port are preserved.
 
@@ -411,10 +456,10 @@ Verify: `kubectl get pdb -n <ns>`
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌─────────────────────┐  ┌─────────────────────┐  ┌──────────┐ │
 │  │   TSC Controller    │  │  JVM Probe Ctrl     │  │  PDB     │ │
-│  │ • Watch Deploys/STS │  │ • Pod webhook       │  │ • Watch  │ │
+│  │ • Pod webhook       │  │ • Pod webhook       │  │ • Watch  │ │
 │  │ • Inject TSC        │  │ • Copy liveness/    │  │   Deploys│ │
-│  │ • GC (replicas<2)   │  │   readiness →       │  │   /STS   │ │
-│  │ • Leader Election   │  │   startupProbe      │  │ • Fix    │ │
+│  │ • Leader election   │  │   readiness →       │  │   /STS   │ │
+│  │                     │  │   startupProbe      │  │ • Fix    │ │
 │  │                     │  │ • Preserves handler │  │   poor   │ │
 │  │                     │  │                     │  │   PDBs   │ │
 │  └──────────┬──────────┘  └─────────┬───────────┘  └────┬─────┘ │
@@ -427,9 +472,9 @@ Verify: `kubectl get pdb -n <ns>`
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-TSC and PDB use: **leader election** (one active replica), **shared informers** (efficient API caching), **ConfigMap watch** (hot-reload, no restart), **rate-limited logging**, and **strategic merge patch** (non-destructive) updates.
+PDB uses: **leader election** (one active replica), **shared informers** (efficient API caching), **ConfigMap watch** (hot-reload, no restart), **rate-limited logging**, and **strategic merge patch** (non-destructive) updates to `PodDisruptionBudget` resources.
 
-The JVM Probe Controller uses a **mutating admission webhook**: it receives Pod CREATE requests from the API server and returns a JSON Patch. It does not watch or patch Deployments/StatefulSets, so it is GitOps-friendly and never causes ArgoCD drift.
+TSC and JVM use a **mutating admission webhook**: they receive Pod CREATE requests from the API server and return JSON Patches. They do not watch or patch Deployments/StatefulSets, so they are GitOps-friendly and never cause ArgoCD drift on parent workload specs.
 
 ---
 
@@ -437,29 +482,28 @@ The JVM Probe Controller uses a **mutating admission webhook**: it receives Pod 
 
 | | PDB Controller | TSC Controller | JVM Probe Controller |
 |---|---|---|---|
-| Target resource | PodDisruptionBudget | topologySpreadConstraints | Container startup probes |
-| Trigger | Deployments, StatefulSets | Deployments, StatefulSets | Pod CREATE admission requests |
+| Target resource | PodDisruptionBudget | `topologySpreadConstraints` on Pods | Container startup probes |
+| Trigger | Deployments, StatefulSets | Pod CREATE admission requests | Pod CREATE admission requests |
 | Default mode | **Live** (`FixPoorPDBs=true`) | Recommend (`mode=recommend`) | **Apply** (webhook) |
 | Go-live action | none (already live) | patch `mode`→`apply` | webhook enabled by default |
-| Modifies parent workload | yes | yes | **no** (mutates Pod only) |
-| GitOps/ArgoCD drift | possible | possible | **none** |
-| Exclusion rules | regex (ns/name/labels) | regex (ns/name) | regex (ns/name) |
-| Garbage collection | orphaned PDBs | TSC when replicas<2 | N/A |
+| Modifies parent workload | no (creates PDBs) | **no** (mutates Pod only) | **no** (mutates Pod only) |
+| GitOps/ArgoCD drift | possible (PDBs managed out-of-band) | **none** | **none** |
+| Exclusion rules | regex (ns/name/labels) | regex (ns/name) + webhook selectors | regex (ns/name) + webhook selectors |
+| Garbage collection | orphaned PDBs | N/A | N/A |
 | Leader election | yes | yes | no |
 
 ---
 
 ## GitOps (ArgoCD / Flux)
 
-TSC and PDB patch Deployment/StatefulSet specs directly via JSON Patch / strategic merge. GitOps tools may detect drift and revert changes, causing a reconciliation loop.
+The **TSC and JVM Probe Controllers do not cause GitOps drift**: they mutate Pods at admission time, so the parent Deployment/StatefulSet spec in Git remains unchanged and ArgoCD/Flux stay in sync.
 
-The **JVM Probe Controller does not cause GitOps drift**: it mutates Pods at admission time, so the parent Deployment/StatefulSet spec in Git remains unchanged and ArgoCD/Flux stay in sync.
+The **PDB Controller can cause GitOps drift** because it manages `PodDisruptionBudget` resources that may not be declared in your Git repository. GitOps tools may show those PDBs as out-of-sync.
 
-Workarounds for TSC/PDB:
+Workarounds for PDB:
 
-1. Add the relevant bypass annotation for GitOps-managed workloads (`workloads.cast.ai/tsc-bypass` or `workloads.cast.ai/bypass-default-pdb`).
-2. Use annotation overrides to declare desired config declaratively in Git.
-3. Run TSC in `recommend` mode and apply changes via GitOps PRs.
+1. Add the bypass annotation for GitOps-managed workloads (`workloads.cast.ai/bypass-default-pdb`).
+2. Declare the desired PDB declaratively in Git (use annotation overrides such as `workloads.cast.ai/pdb-minAvailable`).
 
 ---
 
@@ -468,7 +512,7 @@ Workarounds for TSC/PDB:
 `install.sh` is recommended, but you can install a single controller directly from its local chart:
 
 ```bash
-# TSC (recommend mode by default — snapshot only)
+# TSC (recommend mode by default — snapshot only; webhook installed but not mutating)
 helm install castai-tsc-controller \
   ./controllers/tsc-controller/helm/castai-tsc-controller \
   -n castai-agent --create-namespace
