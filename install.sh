@@ -53,7 +53,7 @@ TSC_IMAGE_TAG_OVERRIDE="${TSC_IMAGE_TAG:-}"
 TSC_WEBHOOK_ENABLED="${TSC_WEBHOOK_ENABLED:-true}"
 TSC_WEBHOOK_FAILURE_POLICY="${TSC_WEBHOOK_FAILURE_POLICY:-Ignore}"
 TSC_CERT_MANAGER_ENABLED="${TSC_CERT_MANAGER_ENABLED:-true}"
-TSC_CERT_MANAGER_ISSUER_REF_NAME="${TSC_CERT_MANAGER_ISSUER_REF_NAME:-}"
+TSC_CERT_MANAGER_ISSUER_REF_NAME="${TSC_CERT_MANAGER_ISSUER_REF_NAME:-castai-guardrails-selfsigned}"
 TSC_CERT_MANAGER_ISSUER_REF_KIND="${TSC_CERT_MANAGER_ISSUER_REF_KIND:-ClusterIssuer}"
 TSC_MANUAL_TLS_ENABLED="${TSC_MANUAL_TLS_ENABLED:-false}"
 TSC_MANUAL_TLS_SECRET_NAME="${TSC_MANUAL_TLS_SECRET_NAME:-}"
@@ -61,6 +61,9 @@ JVM_IMAGE_TAG_OVERRIDE="${JVM_IMAGE_TAG:-}"
 # JVM is a Pod-mutating admission webhook. Set to "false" to install the
 # controller without registering the webhook (no Pod mutations).
 JVM_WEBHOOK_ENABLED="${JVM_WEBHOOK_ENABLED:-true}"
+JVM_CERT_MANAGER_ENABLED="${JVM_CERT_MANAGER_ENABLED:-true}"
+JVM_CERT_MANAGER_ISSUER_REF_NAME="${JVM_CERT_MANAGER_ISSUER_REF_NAME:-castai-guardrails-selfsigned}"
+JVM_CERT_MANAGER_ISSUER_REF_KIND="${JVM_CERT_MANAGER_ISSUER_REF_KIND:-ClusterIssuer}"
 PDB_IMAGE_TAG_OVERRIDE="${PDB_IMAGE_TAG:-}"
 
 # -------------------------
@@ -181,6 +184,9 @@ log_install_failure() {
     [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_CERT_MANAGER_ISSUER_REF_NAME=${TSC_CERT_MANAGER_ISSUER_REF_NAME}"
     [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_MANUAL_TLS_ENABLED=${TSC_MANUAL_TLS_ENABLED}"
     [ "${INSTALL_TSC:-false}" = true ] && echo "  TSC_MANUAL_TLS_SECRET_NAME=${TSC_MANUAL_TLS_SECRET_NAME}"
+    [ "${INSTALL_JVM:-false}" = true ] && echo "  JVM_CERT_MANAGER_ENABLED=${JVM_CERT_MANAGER_ENABLED}"
+    [ "${INSTALL_JVM:-false}" = true ] && echo "  JVM_CERT_MANAGER_ISSUER_REF_NAME=${JVM_CERT_MANAGER_ISSUER_REF_NAME}"
+    [ "${INSTALL_JVM:-false}" = true ] && echo "  JVM_CERT_MANAGER_ISSUER_REF_KIND=${JVM_CERT_MANAGER_ISSUER_REF_KIND}"
     echo ""
     echo "--- Helm command ---"
     printf 'helm'
@@ -312,6 +318,30 @@ latest_git_tag_version() {
 TSC_TAG_DEFAULT="$(latest_git_tag_version "tsc" "$TSC_APP")"
 JVM_TAG_DEFAULT="$(latest_git_tag_version "jvm" "$JVM_APP")"
 PDB_TAG_DEFAULT="$(latest_git_tag_version "pdb" "$PDB_APP")"
+
+# -------------------------
+# ensure_selfsigned_issuer
+# -------------------------
+# Best-effort creates a cluster-scoped self-signed ClusterIssuer used by the
+# TSC and JVM admission webhook certificates when cert-manager is enabled and
+# the operator has not opted for manual TLS. Safe to run when cert-manager is
+# not installed: the kubectl apply returns non-zero and we log a warning, but
+# the installer continues.
+ensure_selfsigned_issuer() {
+  local any_cert_manager=false
+  [ "${INSTALL_TSC:-false}" = true ] && [ "${TSC_CERT_MANAGER_ENABLED:-false}" = true ] && [ "${TSC_MANUAL_TLS_ENABLED:-false}" != true ] && any_cert_manager=true
+  [ "${INSTALL_JVM:-false}" = true ] && [ "${JVM_CERT_MANAGER_ENABLED:-false}" = true ] && any_cert_manager=true
+  [ "$any_cert_manager" = false ] && return 0
+  info "Ensuring self-signed ClusterIssuer 'castai-guardrails-selfsigned' exists..."
+  kubectl apply --server-side -f - >/dev/null 2>&1 <<EOF || warn "Could not ensure ClusterIssuer castai-guardrails-selfsigned (cert-manager may not be installed)"
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: castai-guardrails-selfsigned
+spec:
+  selfSigned: {}
+EOF
+}
 
 # -------------------------
 # Determine if interactive
@@ -514,8 +544,8 @@ if [ "$IS_INTERACTIVE" = true ]; then
   echo "============================================================"
   echo "  Namespace : ${NAMESPACE}"
   echo "  Cluster   : ${CLUSTER_NAME}"
-  [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_IMAGE_TAG_OVERRIDE:-$TSC_TAG_DEFAULT}  mode=${TSC_MODE}  webhook=${TSC_WEBHOOK_ENABLED}  cert-manager=${TSC_CERT_MANAGER_ENABLED}  manualTLS=${TSC_MANUAL_TLS_ENABLED}"
-  [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-$JVM_TAG_DEFAULT}  webhook=${JVM_WEBHOOK_ENABLED}"
+  [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_IMAGE_TAG_OVERRIDE:-$TSC_TAG_DEFAULT}  mode=${TSC_MODE}  webhook=${TSC_WEBHOOK_ENABLED}  cert-manager=${TSC_CERT_MANAGER_ENABLED}  issuer=${TSC_CERT_MANAGER_ISSUER_REF_NAME}  manualTLS=${TSC_MANUAL_TLS_ENABLED}"
+  [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-$JVM_TAG_DEFAULT}  webhook=${JVM_WEBHOOK_ENABLED}  cert-manager=${JVM_CERT_MANAGER_ENABLED}  issuer=${JVM_CERT_MANAGER_ISSUER_REF_NAME}"
   [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_IMAGE_TAG_OVERRIDE:-$PDB_TAG_DEFAULT}  FixPoorPDBs=true (live)"
   echo ""
 
@@ -549,6 +579,11 @@ else
   spin_fail
   fatal "Failed to create namespace '${NAMESPACE}'."
 fi
+
+# -------------------------
+# Ensure self-signed ClusterIssuer (best-effort)
+# -------------------------
+ensure_selfsigned_issuer
 
 # -------------------------
 # Install shared CRDs as a separate Helm release
@@ -641,6 +676,9 @@ install_chart() {
       # Helm values (webhook.enabled, webhook.failurePolicy, certManager.enabled,
       # ...) rather than a runtime management mode.
       args+=(--set webhook.enabled="$JVM_WEBHOOK_ENABLED")
+      args+=(--set certManager.enabled="$JVM_CERT_MANAGER_ENABLED")
+      args+=(--set certManager.issuerRef.name="$JVM_CERT_MANAGER_ISSUER_REF_NAME")
+      args+=(--set certManager.issuerRef.kind="$JVM_CERT_MANAGER_ISSUER_REF_KIND")
       ;;
     PDB)
       # PDB has no mode toggle. FixPoorPDBs is enabled by default so the
