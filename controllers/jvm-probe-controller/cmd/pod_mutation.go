@@ -74,6 +74,15 @@ func mutatePod(_ context.Context, review *admissionv1.AdmissionReview, cfg *JVMC
 		return nil, fmt.Errorf("decode pod: %w", err)
 	}
 
+	// Defense-in-depth: even if buildPodProbePatches were called with a
+	// managed config, the entry point refuses to mutate when
+	// ManagementEnabled is off. This keeps the disable path testable at
+	// the HTTP boundary as well.
+	if cfg != nil && !cfg.ManagementEnabled {
+		logDebug("jvm-disabled", "Skipping %s/%s, management disabled", pod.Namespace, pod.Name)
+		return resp, nil
+	}
+
 	result, err := buildPodProbePatches(pod, cfg)
 	if err != nil {
 		return nil, err
@@ -111,6 +120,14 @@ func mutatePod(_ context.Context, review *admissionv1.AdmissionReview, cfg *JVMC
 //  9. Add the managed Pod annotation when any container was mutated.
 func buildPodProbePatches(pod *corev1.Pod, cfg *JVMConfig) (*podMutationResult, error) {
 	if pod == nil || cfg == nil {
+		return &podMutationResult{}, nil
+	}
+
+	// ManagementEnabled is the master switch. When it is off the webhook
+	// must not produce any patches — it must remain a no-op even for
+	// otherwise-mutating inputs.
+	if !cfg.ManagementEnabled {
+		logDebug("jvm-disabled", "Skipping %s/%s, management disabled", pod.Namespace, pod.Name)
 		return &podMutationResult{}, nil
 	}
 

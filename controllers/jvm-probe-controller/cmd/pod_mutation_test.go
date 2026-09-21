@@ -1356,6 +1356,36 @@ func TestBuildPodProbePatches_AlignOnlyWithStartup(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Chunk 6: when ManagementEnabled is false the webhook must produce no
+// patches, even for a JVM Pod with probes.
+// ---------------------------------------------------------------------------
+
+func TestBuildPodProbePatches_ManagementDisabled(t *testing.T) {
+	cfg := DefaultJVMConfig()
+	cfg.ManagementEnabled = false
+
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				jvmContainer("app", func(c *corev1.Container) {
+					c.LivenessProbe = httpGetLiveness("/actuator/health/liveness")
+				}),
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, &cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.mutationApplied {
+		t.Errorf("mutationApplied = true, want false (ManagementEnabled=false)")
+	}
+	if len(result.patches) != 0 {
+		t.Errorf("patches = %d, want 0 (ManagementEnabled=false); got: %+v", len(result.patches), result.patches)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 

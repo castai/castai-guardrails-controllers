@@ -136,18 +136,25 @@ webhook:
 # and the MutatingWebhookConfiguration uses the cert-manager CA injection
 # annotation. The referenced issuer must already exist in the cluster.
 #
-# IMPORTANT: defaults to false so the chart renders a webhook that requires
-# an explicit opt-in. To enable cert-manager-managed certificates, set both
-# certManager.enabled=true and certManager.issuerRef.name=<your-issuer>.
-# Alternatively, set tls.manualSecret.enabled=true and tls.manualSecret.name
-# to point at an operator-managed Secret with tls.crt/tls.key. Without one
-# of these two paths the MutatingWebhookConfiguration will have an empty
-# caBundle and the API server will not trust the webhook.
+# Defaults align with install.sh (which installs a self-signed ClusterIssuer
+# named castai-guardrails-selfsigned) so that `helm install` works out of the
+# box when cert-manager is present.
+#
+# IMPORTANT: exactly one of the following must be supplied, otherwise the
+# API server will not trust the webhook and pod mutations will be ignored
+# (failurePolicy is Ignore):
+#   - cert-manager:    certManager.enabled=true AND certManager.issuerRef.name set
+#                      (recommended; uses cert-manager.io/inject-ca-from)
+#   - manual secret:   tls.manualSecret.enabled=true AND tls.manualSecret.name
+#                      set to an existing TLS Secret (you supply tls.crt/tls.key
+#                      and chart does not render a Certificate)
+#   - explicit bundle: webhook.caBundle set to a base64-encoded PEM CA bundle
 certManager:
-  enabled: false
+  enabled: true
   issuerRef:
-    # Name of the cert-manager Issuer / ClusterIssuer.
-    name: ""
+    # Name of the cert-manager Issuer / ClusterIssuer. install.sh ships a
+    # self-signed ClusterIssuer named castai-guardrails-selfsigned.
+    name: castai-guardrails-selfsigned
     kind: ClusterIssuer
     # group is omitted by default (cert-manager.io is the default API group).
     group: ""
