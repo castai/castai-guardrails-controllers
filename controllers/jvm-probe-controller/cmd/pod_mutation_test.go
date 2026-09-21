@@ -192,6 +192,112 @@ func TestBuildPodProbePatches_BypassNoPatch(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Regression test: a JVM Pod with no metadata.annotations at all must still
+// produce a valid patch. RFC 6902 forbids an "add" patch targeting a child
+// of an absent object, so the controller must emit a parent-level "add"
+// patch that creates /metadata/annotations as a map containing the managed
+// annotation. Without this guard the API server rejects the patch with
+// "doc is missing path: /metadata/annotations/...: missing value" and Pod
+// creation crash-loops.
+// ---------------------------------------------------------------------------
+
+func TestBuildPodProbePatches_NoAnnotationsCreatesParentMap(t *testing.T) {
+	// Pod with no annotations at all (Annotations field is nil).
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: nil,
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				jvmContainer("app", func(c *corev1.Container) {
+					c.LivenessProbe = httpGetLiveness("/health")
+				}),
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, defaultTestConfig())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.mutationApplied {
+		t.Fatalf("expected mutationApplied = true")
+	}
+
+	// The parent-level add patch must be present and target
+	// /metadata/annotations (not a child path), because the object does
+	// not exist yet.
+	parentPatch := findPatch(result.patches, "/metadata/annotations")
+	if parentPatch == nil {
+		t.Fatalf("expected parent-level add patch at /metadata/annotations, got: %+v", result.patches)
+	}
+	if parentPatch.Op != "add" {
+		t.Errorf("parent patch op = %q, want add", parentPatch.Op)
+	}
+	annotations, ok := parentPatch.Value.(map[string]string)
+	if !ok {
+		t.Fatalf("parent patch value type = %T, want map[string]string", parentPatch.Value)
+	}
+	if annotations[AnnotationJVMProbeManaged] != "true" {
+		t.Errorf("managed annotation value = %q, want \"true\"; got map: %+v", annotations[AnnotationJVMProbeManaged], annotations)
+	}
+
+	// The patch set must apply cleanly. This is the key regression
+	// assertion: prior to the fix, this returned an error from the
+	// json-patch library because the parent object was missing.
+	mutated := applyPatches(t, pod, result.patches)
+	if mutated.Annotations == nil {
+		t.Fatalf("mutated Pod has nil annotations after applying patches")
+	}
+	if mutated.Annotations[AnnotationJVMProbeManaged] != "true" {
+		t.Errorf("mutated Pod annotations = %+v, want managed=\"true\"", mutated.Annotations)
+	}
+	// Container-level mutation must still have taken effect.
+	if mutated.Spec.Containers[0].StartupProbe == nil {
+		t.Errorf("expected startupProbe to be installed on the container")
+	}
+
+	// The buggy single-key child patch must NOT be present: emitting both
+	// would cause the API server to reject the request with a duplicate
+	// path error.
+	if patchExists(result.patches, "/metadata/annotations/"+escapeJSONPatchKey(AnnotationJVMProbeManaged)) {
+		t.Errorf("did not expect single-key child patch when annotations map is absent; got: %+v", result.patches)
+	}
+}
+
+// Empty (non-nil) annotations map must follow the same parent-add path as a
+// nil map: an empty map serialises the same way at the API server, and the
+// "add" operation on a child path would still fail because Kubernetes
+// reconstructs the object from typed Go fields where an empty map is
+// indistinguishable from a missing one once the patch is applied.
+func TestBuildPodProbePatches_EmptyAnnotationsCreatesParentMap(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				jvmContainer("app", func(c *corev1.Container) {
+					c.LivenessProbe = httpGetLiveness("/health")
+				}),
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, defaultTestConfig())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.mutationApplied {
+		t.Fatalf("expected mutationApplied = true")
+	}
+	parentPatch := findPatch(result.patches, "/metadata/annotations")
+	if parentPatch == nil {
+		t.Fatalf("expected parent-level add patch for empty annotations, got: %+v", result.patches)
+	}
+	// Patch set must apply without error.
+	applyPatches(t, pod, result.patches)
+}
+
+// ---------------------------------------------------------------------------
 // Acceptance criterion 2: liveness present, startup missing → copy and tune.
 // ---------------------------------------------------------------------------
 
@@ -238,8 +344,12 @@ func TestBuildPodProbePatches_LivenessCopiedToStartup(t *testing.T) {
 		t.Errorf("startup SuccessThreshold = %d, want 1", probe.SuccessThreshold)
 	}
 
-	// Managed annotation patch should also be present.
-	if !patchExists(result.patches, "/metadata/annotations/"+escapeJSONPatchKey(AnnotationJVMProbeManaged)) {
+	// Managed annotation patch should also be present. When the Pod has
+	// no annotations at all the controller emits a parent-level "add"
+	// patch at /metadata/annotations; otherwise it emits the child-key
+	// patch. Both forms convey the same managed state.
+	if !patchExists(result.patches, "/metadata/annotations/"+escapeJSONPatchKey(AnnotationJVMProbeManaged)) &&
+		!patchExists(result.patches, "/metadata/annotations") {
 		t.Errorf("managed annotation patch missing")
 	}
 }

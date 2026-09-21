@@ -169,11 +169,28 @@ func buildPodProbePatches(pod *corev1.Pod, cfg *JVMConfig) (*podMutationResult, 
 		// container logic produces no patches so this annotation is not
 		// re-emitted.
 		if pod.Annotations[AnnotationJVMProbeManaged] != "true" {
-			result.patches = append(result.patches, jsonPatchOp{
-				Op:    "add",
-				Path:  "/metadata/annotations/" + escapeJSONPatchKey(AnnotationJVMProbeManaged),
-				Value: "true",
-			})
+			// RFC 6902 forbids an "add" patch that targets a child path
+			// when the parent object does not exist. When the Pod has no
+			// metadata.annotations at all, we must first create the parent
+			// map before patching the single key inside it. Otherwise the
+			// API server rejects the patch with "doc is missing path:
+			// /metadata/annotations: missing value" and Pod creation
+			// crash-loops.
+			if len(pod.Annotations) == 0 {
+				result.patches = append(result.patches, jsonPatchOp{
+					Op:   "add",
+					Path: "/metadata/annotations",
+					Value: map[string]string{
+						AnnotationJVMProbeManaged: "true",
+					},
+				})
+			} else {
+				result.patches = append(result.patches, jsonPatchOp{
+					Op:    "add",
+					Path:  "/metadata/annotations/" + escapeJSONPatchKey(AnnotationJVMProbeManaged),
+					Value: "true",
+				})
+			}
 		}
 	}
 

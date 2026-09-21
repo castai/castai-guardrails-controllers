@@ -65,6 +65,10 @@ JVM_CERT_MANAGER_ENABLED="${JVM_CERT_MANAGER_ENABLED:-true}"
 JVM_CERT_MANAGER_ISSUER_REF_NAME="${JVM_CERT_MANAGER_ISSUER_REF_NAME:-castai-guardrails-selfsigned}"
 JVM_CERT_MANAGER_ISSUER_REF_KIND="${JVM_CERT_MANAGER_ISSUER_REF_KIND:-ClusterIssuer}"
 PDB_IMAGE_TAG_OVERRIDE="${PDB_IMAGE_TAG:-}"
+# PDB is live by default (FixPoorPDBs=true). Set to "false" to install in
+# read-only / warn-only mode; the controller will log poor PDBs but will
+# not create, update, or delete them.
+PDB_FIX_POOR_PDBS="${PDB_FIX_POOR_PDBS:-true}"
 
 # -------------------------
 # Colors (castctl style: cyan [INFO], green [OK], red ERROR, yellow WARN)
@@ -546,7 +550,7 @@ if [ "$IS_INTERACTIVE" = true ]; then
   echo "  Cluster   : ${CLUSTER_NAME}"
   [ "$INSTALL_TSC" = true ] && echo "  TSC       : tag=${TSC_IMAGE_TAG_OVERRIDE:-$TSC_TAG_DEFAULT}  mode=${TSC_MODE}  webhook=${TSC_WEBHOOK_ENABLED}  cert-manager=${TSC_CERT_MANAGER_ENABLED}  issuer=${TSC_CERT_MANAGER_ISSUER_REF_NAME}  manualTLS=${TSC_MANUAL_TLS_ENABLED}"
   [ "$INSTALL_JVM" = true ] && echo "  JVM       : tag=${JVM_IMAGE_TAG_OVERRIDE:-$JVM_TAG_DEFAULT}  webhook=${JVM_WEBHOOK_ENABLED}  cert-manager=${JVM_CERT_MANAGER_ENABLED}  issuer=${JVM_CERT_MANAGER_ISSUER_REF_NAME}"
-  [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_IMAGE_TAG_OVERRIDE:-$PDB_TAG_DEFAULT}  FixPoorPDBs=true (live)"
+  [ "$INSTALL_PDB" = true ] && echo "  PDB       : tag=${PDB_IMAGE_TAG_OVERRIDE:-$PDB_TAG_DEFAULT}  FixPoorPDBs=${PDB_FIX_POOR_PDBS}  ($([ "$PDB_FIX_POOR_PDBS" = true ] && echo "live" || echo "read-only"))"
   echo ""
 
   if ! confirm "Proceed with installation?" y; then
@@ -681,9 +685,9 @@ install_chart() {
       args+=(--set certManager.issuerRef.kind="$JVM_CERT_MANAGER_ISSUER_REF_KIND")
       ;;
     PDB)
-      # PDB has no mode toggle. FixPoorPDBs is enabled by default so the
-      # controller auto-remediates poor PDBs immediately on install.
-      args+=(--set config.FixPoorPDBs="true")
+      # PDB has no runtime mode toggle; FixPoorPDBs controls whether it is
+      # live (create/fix/delete PDBs) or read-only (warn-only).
+      args+=(--set config.FixPoorPDBs="$PDB_FIX_POOR_PDBS")
       ;;
   esac
 
@@ -771,61 +775,73 @@ echo ""
 echo "============================================================"
 ok "Installation finished."
 echo ""
-step "Watch controller logs:"
-if [ "$INSTALL_TSC" = true ]; then
-  echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-tsc-controller       --tail=50 -f"
-fi
-if [ "$INSTALL_JVM" = true ]; then
-  echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-jvm-probe-controller --tail=50 -f"
-fi
-if [ "$INSTALL_PDB" = true ]; then
-  echo "    kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-pdb-controller      --tail=50 -f"
-fi
-echo ""
-if [ "$INSTALL_PDB" = true ]; then
-  step "PDB is live by default (FixPoorPDBs=true). To re-apply via Helm:"
-  echo "    helm upgrade castai-pdb-controller ${PDB_CHART} -n ${NAMESPACE} --set config.FixPoorPDBs=\"true\""
-  echo ""
-fi
-step "Bypass a single workload with an annotation:"
-echo "    workloads.cast.ai/tsc-bypass: \"true\""
-echo "    workloads.cast.ai/jvm-probe-bypass: \"true\""
-echo "    workloads.cast.ai/bypass-default-pdb: \"true\""
 echo ""
 echo "============================================================"
 echo " Next steps"
 echo "============================================================"
 echo ""
+echo "  Controller modes after this install:"
+[ "$INSTALL_TSC" = true ] && echo "    TSC  : ${TSC_MODE} (default: recommend = read-only)"
+[ "$INSTALL_JVM" = true ] && { [ "$JVM_WEBHOOK_ENABLED" = true ] && echo "    JVM  : webhook enabled (mutating)" || echo "    JVM  : webhook disabled (read-only)"; }
+[ "$INSTALL_PDB" = true ] && { [ "$PDB_FIX_POOR_PDBS" = true ] && echo "    PDB  : FixPoorPDBs=true (live)" || echo "    PDB  : FixPoorPDBs=false (read-only)"; }
+echo ""
+
+echo "  [1] Watch controller logs"
 if [ "$INSTALL_TSC" = true ]; then
-  step "Enable TSC apply mode (default after install is recommend — controller only snapshots):"
-  echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\",\"mode\":\"apply\"}}'"
-  echo ""
-  step "Disable TSC and rollback changes:"
-  echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
-  echo ""
-  step "TSC recommend mode (capture snapshots but do not patch):"
-  echo "    kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"mode\":\"recommend\"}}'"
-  echo ""
-  step "Verify TSC snapshots:"
-  echo "    kubectl get tscoriginals -n ${NAMESPACE}"
-  echo ""
-  step "Check TSC rollback status:"
-  echo "    kubectl get tscoriginals -n ${NAMESPACE} -o jsonpath='{range .items[*]}{.metadata.name}{\"\t\"}{.status.conditions[?(@.type==\"RolledBack\")].status}{\"\n\"}{end}'"
-  echo ""
+  echo "      TSC  : kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-tsc-controller       --tail=50 -f"
 fi
 if [ "$INSTALL_JVM" = true ]; then
-  step "The JVM controller is a Pod-mutating admission webhook."
-  if [ "$JVM_WEBHOOK_ENABLED" = true ]; then
-    step "To disable the webhook (stop mutating Pods) without uninstalling:"
-    echo "    helm upgrade castai-jvm-probe-controller ${JVM_CHART} -n ${NAMESPACE} --set webhook.enabled=false"
-  else
-    step "The webhook is currently disabled. To re-enable mutations:"
-    echo "    helm upgrade castai-jvm-probe-controller ${JVM_CHART} -n ${NAMESPACE} --set webhook.enabled=true"
-  fi
-  step "Other webhook settings (failurePolicy, certManager, namespaceSelector, ...)"
-  step "can be changed with the same helm upgrade command on the JVM chart."
-  echo ""
+  echo "      JVM  : kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-jvm-probe-controller --tail=50 -f"
+fi
+if [ "$INSTALL_PDB" = true ]; then
+  echo "      PDB  : kubectl logs -n ${NAMESPACE} -l app.kubernetes.io/name=castai-pdb-controller      --tail=50 -f"
 fi
 echo ""
-step "See docs/rollback-operator-runbook.md for the full runbook."
+
+if [ "$INSTALL_TSC" = true ]; then
+  echo "  [2] TSC: switch between read-only and apply mode"
+  echo "      Read-only (recommend) — snapshots only, does not mutate Pods:"
+  echo "        kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\",\"mode\":\"recommend\"}}'"
+  echo "      Apply mode — inject topologySpreadConstraints into new Pods:"
+  echo "        kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"true\",\"rollbackOnDisable\":\"false\",\"mode\":\"apply\"}}'"
+  echo "      Disable TSC and roll back injected changes:"
+  echo "        kubectl -n ${NAMESPACE} patch cm castai-tsc-controller-config --type merge -p '{\"data\":{\"managementEnabled\":\"false\",\"rollbackOnDisable\":\"true\"}}'"
+  echo "      Verify snapshots:"
+  echo "        kubectl get tscoriginals -n ${NAMESPACE}"
+  echo "      Check rollback status:"
+  echo "        kubectl get tscoriginals -n ${NAMESPACE} -o jsonpath='{range .items[*]}{.metadata.name}{\"\t\"}{.status.conditions[?(@.type==\"RolledBack\")].status}{\"\n\"}{end}'"
+  echo ""
+fi
+
+if [ "$INSTALL_JVM" = true ]; then
+  echo "  [3] JVM Probe: enable or disable Pod mutations"
+  echo "      Disable the webhook (read-only, no mutations):"
+  echo "        helm upgrade castai-jvm-probe-controller ${JVM_CHART} -n ${NAMESPACE} --set webhook.enabled=false"
+  echo "      Re-enable the webhook (mutating):"
+  echo "        helm upgrade castai-jvm-probe-controller ${JVM_CHART} -n ${NAMESPACE} --set webhook.enabled=true"
+  echo "      Re-install non-interactively with webhook disabled:"
+  echo "        INSTALL_JVM=true JVM_WEBHOOK_ENABLED=false ./install.sh"
+  echo ""
+fi
+
+if [ "$INSTALL_PDB" = true ]; then
+  echo "  [4] PDB Controller: switch between live and read-only mode"
+  echo "      Live mode — create/fix/delete PDBs:"
+  echo "        helm upgrade castai-pdb-controller ${PDB_CHART} -n ${NAMESPACE} --set config.FixPoorPDBs=\"true\""
+  echo "      Read-only mode — log poor PDBs but do not change them:"
+  echo "        helm upgrade castai-pdb-controller ${PDB_CHART} -n ${NAMESPACE} --set config.FixPoorPDBs=\"false\""
+  echo "      Re-install non-interactively in read-only mode:"
+  echo "        INSTALL_PDB=true PDB_FIX_POOR_PDBS=false ./install.sh"
+  echo ""
+fi
+
+echo "  [5] Bypass a single workload with annotations"
+echo "      TSC : workloads.cast.ai/tsc-bypass: \"true\""
+echo "      JVM : workloads.cast.ai/jvm-probe-bypass: \"true\""
+echo "      PDB : workloads.cast.ai/bypass-default-pdb: \"true\""
+echo ""
+
+echo "  [6] Full runbook"
+echo "      See docs/rollback-operator-runbook.md"
+echo ""
 echo "============================================================"
