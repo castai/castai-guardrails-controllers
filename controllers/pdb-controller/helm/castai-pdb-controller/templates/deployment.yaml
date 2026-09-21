@@ -13,8 +13,7 @@ spec:
   {{- end }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: castai-pdb-controller
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "castai-pdb-controller.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
