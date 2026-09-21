@@ -33,4 +33,12 @@ app.kubernetes.io/name: {{ include "castai-pdb-controller.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
+Selector labels (stable across chart upgrades; must not include version)
+*/}}
+{{- define "castai-pdb-controller.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "castai-pdb-controller.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }} 
