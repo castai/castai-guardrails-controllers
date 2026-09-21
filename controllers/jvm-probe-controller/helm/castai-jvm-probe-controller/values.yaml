@@ -180,6 +180,12 @@ webhook:
   # Pods cluster-wide (subject to RBAC of the api server invoking it).
   namespaceSelector: {}
   objectSelector: {}
+  # Manual CA bundle override. When empty and cert-manager is enabled, the
+  # chart relies on the cert-manager.io/inject-ca-from annotation to populate
+  # caBundle at install time. Set this when tls.manualSecret.enabled=true so
+  # the API server trusts the certificate supplied via the operator-managed
+  # Secret.
+  caBundle: ""
 
 # cert-manager integration. When enabled, a Certificate resource is rendered
 # and the MutatingWebhookConfiguration uses the cert-manager CA injection
@@ -187,8 +193,10 @@ webhook:
 certManager:
   enabled: true
   issuerRef:
-    # Name of the cert-manager Issuer / ClusterIssuer.
-    name: ""
+    # Name of the cert-manager Issuer / ClusterIssuer. Defaults to the
+    # self-signed ClusterIssuer created by install.sh; override here when the
+    # cluster uses a different issuer.
+    name: castai-guardrails-selfsigned
     kind: ClusterIssuer
     # group is omitted by default (cert-manager.io is the default API group).
     group: ""

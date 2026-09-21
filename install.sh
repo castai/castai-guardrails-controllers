@@ -64,6 +64,8 @@ JVM_WEBHOOK_ENABLED="${JVM_WEBHOOK_ENABLED:-true}"
 JVM_CERT_MANAGER_ENABLED="${JVM_CERT_MANAGER_ENABLED:-true}"
 JVM_CERT_MANAGER_ISSUER_REF_NAME="${JVM_CERT_MANAGER_ISSUER_REF_NAME:-castai-guardrails-selfsigned}"
 JVM_CERT_MANAGER_ISSUER_REF_KIND="${JVM_CERT_MANAGER_ISSUER_REF_KIND:-ClusterIssuer}"
+JVM_MANUAL_TLS_ENABLED="${JVM_MANUAL_TLS_ENABLED:-false}"
+JVM_MANUAL_TLS_SECRET_NAME="${JVM_MANUAL_TLS_SECRET_NAME:-}"
 PDB_IMAGE_TAG_OVERRIDE="${PDB_IMAGE_TAG:-}"
 
 # -------------------------
@@ -330,10 +332,10 @@ PDB_TAG_DEFAULT="$(latest_git_tag_version "pdb" "$PDB_APP")"
 ensure_selfsigned_issuer() {
   local any_cert_manager=false
   [ "${INSTALL_TSC:-false}" = true ] && [ "${TSC_CERT_MANAGER_ENABLED:-false}" = true ] && [ "${TSC_MANUAL_TLS_ENABLED:-false}" != true ] && any_cert_manager=true
-  [ "${INSTALL_JVM:-false}" = true ] && [ "${JVM_CERT_MANAGER_ENABLED:-false}" = true ] && any_cert_manager=true
+  [ "${INSTALL_JVM:-false}" = true ] && [ "${JVM_CERT_MANAGER_ENABLED:-false}" = true ] && [ "${JVM_MANUAL_TLS_ENABLED:-false}" != true ] && any_cert_manager=true
   [ "$any_cert_manager" = false ] && return 0
   info "Ensuring self-signed ClusterIssuer 'castai-guardrails-selfsigned' exists..."
-  kubectl apply --server-side -f - >/dev/null 2>&1 <<EOF || warn "Could not ensure ClusterIssuer castai-guardrails-selfsigned (cert-manager may not be installed)"
+  if ! kubectl apply --server-side -f - >/dev/null 2>&1 <<EOF
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -341,6 +343,11 @@ metadata:
 spec:
   selfSigned: {}
 EOF
+  then
+    warn "Failed to apply ClusterIssuer 'castai-guardrails-selfsigned'."
+    fatal "Could not ensure the self-signed ClusterIssuer. This usually means cert-manager is not installed on the cluster. Either install cert-manager (https://cert-manager.io/docs/installation/) before re-running this installer, or disable cert-manager and switch to manual TLS by setting *_CERT_MANAGER_ENABLED=false and *_MANUAL_TLS_ENABLED=true (with *_MANUAL_TLS_SECRET_NAME pointing at a pre-provisioned Kubernetes TLS secret containing tls.crt and tls.key)."
+  fi
+  ok "Self-signed ClusterIssuer 'castai-guardrails-selfsigned' ready."
 }
 
 # -------------------------
@@ -679,6 +686,8 @@ install_chart() {
       args+=(--set certManager.enabled="$JVM_CERT_MANAGER_ENABLED")
       args+=(--set certManager.issuerRef.name="$JVM_CERT_MANAGER_ISSUER_REF_NAME")
       args+=(--set certManager.issuerRef.kind="$JVM_CERT_MANAGER_ISSUER_REF_KIND")
+      args+=(--set tls.manualSecret.enabled="$JVM_MANUAL_TLS_ENABLED")
+      args+=(--set tls.manualSecret.name="$JVM_MANUAL_TLS_SECRET_NAME")
       ;;
     PDB)
       # PDB has no mode toggle. FixPoorPDBs is enabled by default so the

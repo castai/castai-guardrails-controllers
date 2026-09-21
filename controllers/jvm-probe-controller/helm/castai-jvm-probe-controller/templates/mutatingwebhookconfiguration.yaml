@@ -39,5 +39,15 @@ webhooks:
         namespace: {{ .Release.Namespace | default "castai-agent" }}
         path: /mutate/pods
         port: {{ .Values.service.port }}
+      {{- if .Values.webhook.caBundle }}
+      caBundle: {{ .Values.webhook.caBundle }}
+      {{- else if and .Values.certManager.enabled .Values.certManager.issuerRef.name (not .Values.tls.manualSecret.enabled) }}
+      # caBundle is intentionally omitted; cert-manager populates it via the
+      # cert-manager.io/inject-ca-from annotation above.
+      {{- else }}
+      # Empty placeholder; populated at install time by:
+      #   - cert-manager (when certManager.enabled=true and issuerRef.name is set), or
+      #   - the operator (via webhook.caBundle when tls.manualSecret.enabled=true).
       caBundle: Cg==
+      {{- end }}
 {{- end }}

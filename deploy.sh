@@ -14,10 +14,15 @@ echo "Image Tag: $IMAGE_TAG"
 echo ""
 echo "=== Deploying TSC Controller ==="
 helm upgrade --install castai-tsc-controller \
-  ./controllers/tsc-controller/castai-tsc-controller/ \
+  ./controllers/tsc-controller/helm/castai-tsc-controller/ \
   --namespace "$NAMESPACE" \
   --create-namespace \
-  --set image.tag="$IMAGE_TAG"
+  --set image.tag="$IMAGE_TAG" \
+  --set webhook.enabled=true \
+  --set certManager.enabled=true \
+  --set certManager.issuerRef.name=castai-guardrails-selfsigned \
+  --set certManager.issuerRef.kind=ClusterIssuer \
+  --set tls.manualSecret.enabled=false
 
 # PDB Controller
 echo ""
@@ -33,7 +38,12 @@ echo "=== Deploying JVM Probe Controller ==="
 helm upgrade --install castai-jvm-probe-controller \
   ./controllers/jvm-probe-controller/helm/castai-jvm-probe-controller/ \
   --namespace "$NAMESPACE" \
-  --set image.tag="$IMAGE_TAG"
+  --set image.tag="$IMAGE_TAG" \
+  --set webhook.enabled=true \
+  --set certManager.enabled=true \
+  --set certManager.issuerRef.name=castai-guardrails-selfsigned \
+  --set certManager.issuerRef.kind=ClusterIssuer \
+  --set tls.manualSecret.enabled=false
 
 echo ""
 echo "=== Deployment Complete ==="
