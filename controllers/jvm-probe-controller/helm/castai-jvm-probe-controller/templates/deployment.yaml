@@ -65,19 +65,15 @@ spec:
             {{- end }}
           {{- if .Values.webhook.enabled }}
           readinessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: {{ .Values.service.targetPort }}
-              scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
           livenessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: {{ .Values.service.targetPort }}
-              scheme: HTTPS
             initialDelaySeconds: 30
             periodSeconds: 30
             timeoutSeconds: 5
@@ -105,7 +101,7 @@ spec:
         - name: webhook-certs
           secret:
             secretName: {{ include "castai-jvm-probe-controller.webhookTLSSecretName" . }}
-            defaultMode: 0400
+            defaultMode: 0440
       {{- end }}
       {{- if .Values.nodeSelector }}
       nodeSelector:
