@@ -170,6 +170,7 @@ func TestBuildProbesForFramework_NamedPortProducesStringPort(t *testing.T) {
 	ci := ContainerInfo{
 		Port:     8080,
 		PortName: "http",
+		Ports:    []corev1.ContainerPort{{Name: "http", ContainerPort: 8080}},
 	}
 	annotations := map[string]string{}
 
@@ -200,6 +201,7 @@ func TestBuildProbesForFramework_CommonPortProducesNumericPort(t *testing.T) {
 	ci := ContainerInfo{
 		Port:     8080,
 		PortName: "",
+		Ports:    []corev1.ContainerPort{{Name: "app", ContainerPort: 8080}},
 	}
 	annotations := map[string]string{}
 
@@ -230,6 +232,7 @@ func TestBuildProbesForFramework_AnnotationOverrideWinsOverNamedPort(t *testing.
 	ci := ContainerInfo{
 		Port:     8080,
 		PortName: "http",
+		Ports:    []corev1.ContainerPort{{Name: "http", ContainerPort: 8080}},
 	}
 	annotations := map[string]string{
 		AnnotationJVMProbePort: "9090",
@@ -261,6 +264,7 @@ func TestBuildProbesForFramework_NoNamedPortProducesNumericPort(t *testing.T) {
 	ci := ContainerInfo{
 		Port:     9000,
 		PortName: "",
+		Ports:    []corev1.ContainerPort{{ContainerPort: 9000}},
 	}
 	annotations := map[string]string{}
 
@@ -335,5 +339,93 @@ func assertNumericPort(t *testing.T, port intstr.IntOrString, want int32, probeL
 	}
 	if port.StrVal != "" {
 		t.Errorf("%s port StrVal = %q, want \"\" for a numeric port", probeLabel, port.StrVal)
+	}
+}
+
+// TestBuildProbesForFramework_NoDeclaredPortsUsesTCP verifies that a JVM
+// container with no declared ports receives tcpSocket probes, even for a
+// framework whose default config (spring-boot) would otherwise emit
+// httpGet probes on /actuator/health. Without this fallback the kubelet
+// would call an HTTP endpoint that has no listener and the pod would
+// restart forever.
+func TestBuildProbesForFramework_NoDeclaredPortsUsesTCP(t *testing.T) {
+	cfg := DefaultJVMConfig()
+	cfg.InjectLivenessProbe = true
+	cfg.InjectReadinessProbe = true
+	cfg.InjectStartupProbe = true
+	// Spring Boot defaults use httpGet, so we can demonstrate that the
+	// no-ports fallback overrides the framework preference.
+	ci := ContainerInfo{
+		Port:     8080,
+		PortName: "",
+		// Ports intentionally empty: BuildProbesForFramework checks
+		// len(containerInfo.Ports) directly.
+	}
+	annotations := map[string]string{}
+
+	liveness, readiness, startup := BuildProbesForFramework(FrameworkSpringBoot, ci, annotations, &cfg)
+
+	if liveness == nil || liveness.TCPSocket == nil {
+		t.Fatalf("expected liveness TCPSocket probe, got %+v", liveness)
+	}
+	if liveness.HTTPGet != nil {
+		t.Errorf("did not expect HTTPGet on liveness when no ports declared, got %+v", liveness.HTTPGet)
+	}
+
+	if readiness == nil || readiness.TCPSocket == nil {
+		t.Fatalf("expected readiness TCPSocket probe, got %+v", readiness)
+	}
+	if readiness.HTTPGet != nil {
+		t.Errorf("did not expect HTTPGet on readiness when no ports declared, got %+v", readiness.HTTPGet)
+	}
+
+	if startup == nil || startup.TCPSocket == nil {
+		t.Fatalf("expected startup TCPSocket probe, got %+v", startup)
+	}
+	if startup.HTTPGet != nil {
+		t.Errorf("did not expect HTTPGet on startup when no ports declared, got %+v", startup.HTTPGet)
+	}
+}
+
+// TestBuildProbesForFramework_DeclaredPortKeepsHTTPPath verifies that a
+// JVM container that declares a port (e.g. spring-boot on 8080) keeps
+// the framework's HTTP probes. The no-ports fallback must not suppress
+// HTTP probes for containers that explicitly declared ports.
+func TestBuildProbesForFramework_DeclaredPortKeepsHTTPPath(t *testing.T) {
+	cfg := DefaultJVMConfig()
+	cfg.InjectLivenessProbe = true
+	cfg.InjectReadinessProbe = true
+	cfg.InjectStartupProbe = true
+	ci := ContainerInfo{
+		Port:     8080,
+		PortName: "",
+		Ports:    []corev1.ContainerPort{{Name: "http", ContainerPort: 8080}},
+	}
+	annotations := map[string]string{}
+
+	liveness, readiness, startup := BuildProbesForFramework(FrameworkSpringBoot, ci, annotations, &cfg)
+
+	if liveness == nil || liveness.HTTPGet == nil {
+		t.Fatalf("expected liveness HTTPGet probe, got %+v", liveness)
+	}
+	if liveness.TCPSocket != nil {
+		t.Errorf("did not expect TCPSocket on liveness when ports declared, got %+v", liveness.TCPSocket)
+	}
+	if liveness.HTTPGet.Path != "/actuator/health/liveness" {
+		t.Errorf("liveness path = %q, want /actuator/health/liveness", liveness.HTTPGet.Path)
+	}
+
+	if readiness == nil || readiness.HTTPGet == nil {
+		t.Fatalf("expected readiness HTTPGet probe, got %+v", readiness)
+	}
+	if readiness.HTTPGet.Path != "/actuator/health/readiness" {
+		t.Errorf("readiness path = %q, want /actuator/health/readiness", readiness.HTTPGet.Path)
+	}
+
+	if startup == nil || startup.HTTPGet == nil {
+		t.Fatalf("expected startup HTTPGet probe, got %+v", startup)
+	}
+	if startup.HTTPGet.Path != "/actuator/health" {
+		t.Errorf("startup path = %q, want /actuator/health", startup.HTTPGet.Path)
 	}
 }

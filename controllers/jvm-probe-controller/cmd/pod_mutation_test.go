@@ -1276,6 +1276,86 @@ func TestBuildPodProbePatches_ManagementDisabled(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// No-declared-ports: JVM container with no Ports must receive a tcpSocket
+// startup probe, not an httpGet on the default port. An httpGet on an
+// unbound port would have the kubelet kill the pod forever.
+// ---------------------------------------------------------------------------
+
+func TestBuildPodProbePatches_NoPortsUsesTCP(t *testing.T) {
+	// InjectStartupProbe=true ensures the algorithm reaches
+	// buildStartupFromFramework. Liveness/readiness are off so the
+	// assertion focuses on the startup probe.
+	cfg := DefaultJVMConfig()
+	cfg.InjectLivenessProbe = false
+	cfg.InjectReadinessProbe = false
+	cfg.InjectStartupProbe = true
+
+	// JVM image, but no Ports declared.
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "app", Image: "eclipse-temurin:17"},
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, &cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.mutationApplied {
+		t.Fatalf("expected mutationApplied = true (startup probe should still be injected)")
+	}
+	patch := findPatch(result.patches, "/spec/containers/0/startupProbe")
+	if patch == nil {
+		t.Fatalf("expected startupProbe patch, got: %+v", result.patches)
+	}
+	probe := decodeProbe(t, patch.Value)
+	if probe.TCPSocket == nil {
+		t.Fatalf("expected TCPSocket probe for container with no declared ports, got %+v", probe)
+	}
+	if probe.HTTPGet != nil {
+		t.Errorf("did not expect HTTPGet on startup probe when no ports declared, got %+v", probe.HTTPGet)
+	}
+}
+
+func TestBuildPodProbePatches_DeclaredPortKeepsHTTPPath(t *testing.T) {
+	// JVM image with a declared port: framework HTTP probes are kept.
+	// Uses a spring-boot image so the detected framework has HTTP paths
+	// (the generic framework falls back to TCP unconditionally, which
+	// would mask the no-ports-vs-declared-ports distinction).
+	cfg := DefaultJVMConfig()
+	cfg.InjectLivenessProbe = false
+	cfg.InjectReadinessProbe = false
+	cfg.InjectStartupProbe = true
+
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				jvmContainer("app", nil), // spring-boot image, port "http" on 8080
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, &cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.mutationApplied {
+		t.Fatalf("expected mutationApplied = true")
+	}
+	patch := findPatch(result.patches, "/spec/containers/0/startupProbe")
+	if patch == nil {
+		t.Fatalf("expected startupProbe patch, got: %+v", result.patches)
+	}
+	probe := decodeProbe(t, patch.Value)
+	if probe.HTTPGet == nil {
+		t.Fatalf("expected HTTPGet probe for container with declared port, got %+v", probe)
+	}
+	if probe.TCPSocket != nil {
+		t.Errorf("did not expect TCPSocket when port is declared, got %+v", probe.TCPSocket)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 

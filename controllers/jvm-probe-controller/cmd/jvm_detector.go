@@ -43,8 +43,8 @@ type ContainerInfo struct {
 	// builders prefer this over the numeric Port whenever it is non-empty
 	// and no workloads.cast.ai/jvm-probe-port annotation override is set.
 	PortName string
-	Ports    []corev1.ContainerPort
-	Env      []corev1.EnvVar
+	Ports []corev1.ContainerPort
+	Env   []corev1.EnvVar
 }
 
 // Framework constants
@@ -105,13 +105,13 @@ func envVarsIndicateJVM(env []corev1.EnvVar) bool {
 // P1: Env vars checked FIRST (strongest signal), then image patterns with word boundaries
 func DetectJVMContainer(container corev1.Container) ContainerInfo {
 	info := ContainerInfo{
-		Name:      container.Name,
-		Image:     container.Image,
-		IsJVM:     false,
-		Framework: FrameworkNone,
-		Port:      8080, // default
-		Ports:     container.Ports,
-		Env:       container.Env,
+		Name:             container.Name,
+		Image:            container.Image,
+		IsJVM:            false,
+		Framework:        FrameworkNone,
+		Port:  8080, // default
+		Ports: container.Ports,
+		Env:   container.Env,
 	}
 
 	// PHASE 1: Check environment variables FIRST (strongest signal)

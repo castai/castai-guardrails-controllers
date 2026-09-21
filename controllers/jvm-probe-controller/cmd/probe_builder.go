@@ -131,6 +131,15 @@ func BuildProbesForFramework(framework string, containerInfo ContainerInfo, anno
 		useTCP = true
 	}
 
+	// If the container declared no ports at all, an HTTP probe on the
+	// default port would have nothing to call and the kubelet would kill
+	// the pod. Fall back to a tcpSocket probe in that case. Containers
+	// that declared ports keep the framework HTTP path so we honour the
+	// user's explicit intent to expose traffic.
+	if len(containerInfo.Ports) == 0 {
+		useTCP = true
+	}
+
 	// Check for custom paths in annotations
 	livenessPath := getAnnotation(annotations, AnnotationJVMProbeLivenessPath, frameworkConfig.LivenessPath)
 	readinessPath := getAnnotation(annotations, AnnotationJVMProbeReadinessPath, frameworkConfig.ReadinessPath)
