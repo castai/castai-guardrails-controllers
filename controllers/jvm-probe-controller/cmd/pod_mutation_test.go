@@ -1596,3 +1596,51 @@ func decodeProbe(t *testing.T, v interface{}) *corev1.Probe {
 }
 
 func pointer[T any](v T) *T { return &v }
+
+// TestBuildPodProbePatches_FrameworkAnnotationForcesJVMDetection verifies
+// that the workloads.cast.ai/jvm-probe-framework annotation can opt a
+// non-JVM image into probe injection. Without the annotation the image
+// would be skipped; with the annotation and a declared port the controller
+// treats it as the requested framework.
+func TestBuildPodProbePatches_FrameworkAnnotationForcesJVMDetection(t *testing.T) {
+	cfg := DefaultJVMConfig()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				AnnotationJVMFramework: "spring-boot",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "app",
+					Image: "my-custom-runtime:1.0",
+					Ports: []corev1.ContainerPort{{ContainerPort: 8080}},
+				},
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, &cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.mutationApplied {
+		t.Fatalf("mutationApplied = false, want true (framework annotation should force JVM detection)")
+	}
+
+	startupPatch := findPatch(result.patches, "/spec/containers/0/startupProbe")
+	if startupPatch == nil {
+		t.Fatalf("expected startupProbe patch; got: %+v", result.patches)
+	}
+	startup := decodeProbe(t, startupPatch.Value)
+	if startup.HTTPGet == nil {
+		t.Fatalf("startupProbe is not an HTTPGet probe; got %+v", startup)
+	}
+	if startup.HTTPGet.Port.IntVal != 8080 {
+		t.Errorf("startupProbe port = %v, want 8080", startup.HTTPGet.Port.IntVal)
+	}
+	if startup.HTTPGet.Path == "" {
+		t.Errorf("startupProbe path is empty")
+	}
+}

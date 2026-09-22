@@ -133,7 +133,7 @@ metadata:
   labels:
     {{- include "castai-jvm-probe-controller.labels" . | nindent 4 }}
 spec:
-  minAvailable: {{ .Values.podDisruptionBudget.minAvailable | default 1 }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable | default 1 }}
   selector:
     matchLabels:
       {{- include "castai-jvm-probe-controller.selectorLabels" . | nindent 6 }}
