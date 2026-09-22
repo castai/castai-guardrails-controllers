@@ -120,6 +120,15 @@ func ParseTSCConfig(cm *corev1.ConfigMap, envVersion string) (*TSCConfig, []erro
 		if err := json.Unmarshal([]byte(v), &cs); err != nil {
 			errs = append(errs, err)
 		} else {
+			// Enforce soft scheduling requirements for the default zone and
+			// hostname spread constraints. If a constraint omits WhenUnsatisfiable
+			// or leaves it empty, default it to ScheduleAnyway so workloads are
+			// never hard-blocked from scheduling by TSCs.
+			for i := range cs {
+				if cs[i].WhenUnsatisfiable == "" {
+					cs[i].WhenUnsatisfiable = corev1.ScheduleAnyway
+				}
+			}
 			cfg.DefaultConstraints = cs
 		}
 	}
