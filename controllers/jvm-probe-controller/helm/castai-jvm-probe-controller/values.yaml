@@ -187,6 +187,18 @@ webhook:
   # Secret.
   caBundle: ""
 
+# Plain-HTTP health server for kubelet probes. The HTTPS webhook server
+# cannot be probed via httpGet without the kubelet trusting the webhook
+# CA, and tcpSocket probes against the HTTPS port cause TLS handshake EOF
+# log spam. A separate plain-HTTP listener serving /healthz avoids both
+# problems. Only rendered when the admission webhook is enabled.
+health:
+  # Listen address inside the container.
+  addr: ":8080"
+  # Container port exposed for the health server. Must match the address
+  # port component above so kubelet probes can reach /healthz.
+  port: 8080
+
 # cert-manager integration. When enabled, a Certificate resource is rendered
 # and the MutatingWebhookConfiguration uses the cert-manager CA injection
 # annotation. The referenced issuer must already exist in the cluster.

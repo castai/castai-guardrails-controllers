@@ -233,3 +233,100 @@ func (s *WebhookServer) Addr() string {
 	<-s.ready
 	return s.listener.Addr().String()
 }
+
+// HealthServer is a plain-HTTP listener that serves /healthz for kubelet
+// probes. It is intentionally minimal: no TLS, no mutation handler, no
+// metrics endpoint. Separating it from WebhookServer keeps the in-cluster
+// probe traffic off the HTTPS admission port — kubelet's tcpSocket probes
+// against the HTTPS port caused TLS handshake EOF log spam, while httpGet
+// probes against a plain HTTP port give kubelet a clean liveness signal.
+type HealthServer struct {
+	addr string
+	mux  *http.ServeMux
+	server *http.Server
+
+	listener net.Listener
+	ready    chan struct{}
+}
+
+// NewHealthServer builds a HealthServer bound to addr. addr may include a
+// port of ":0" (or "127.0.0.1:0") for tests that need an ephemeral port.
+// Only /healthz is registered; /metrics and /mutate/pods are not exposed
+// on this listener.
+func NewHealthServer(addr string) *HealthServer {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	return &HealthServer{
+		addr:  addr,
+		mux:   mux,
+		ready: make(chan struct{}),
+	}
+}
+
+// Start binds the listener and serves until ctx is canceled or the server
+// returns an error. It mirrors WebhookServer.Start's contract so callers
+// can drive both servers with the same pattern.
+func (s *HealthServer) Start(ctx context.Context) error {
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return fmt.Errorf("health listen on %s: %w", s.addr, err)
+	}
+	s.listener = ln
+
+	s.server = &http.Server{
+		Handler:           s.mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		err := s.server.Serve(ln)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
+			return
+		}
+		serveErr <- nil
+	}()
+
+	// Publishing readiness is the happens-before edge for any caller that
+	// reads Addr() or Listener(): after close(s.ready) returns, the
+	// listener field is visible.
+	close(s.ready)
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), webhookShutdownTimeout)
+		defer cancel()
+		if err := s.server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			<-serveErr
+			return fmt.Errorf("health shutdown: %w", err)
+		}
+		<-serveErr
+		return nil
+	case err := <-serveErr:
+		return err
+	}
+}
+
+// Stop performs a graceful shutdown of the server, bounded by the supplied
+// context's deadline. It is safe to call when the server has already been
+// stopped or was never started; subsequent calls are no-ops.
+func (s *HealthServer) Stop(ctx context.Context) error {
+	if s.server == nil {
+		return nil
+	}
+	err := s.server.Shutdown(ctx)
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("health shutdown: %w", err)
+	}
+	return nil
+}
+
+// Addr returns the actual TCP address the health server is listening on.
+// It blocks until the listener has been opened by Start.
+func (s *HealthServer) Addr() string {
+	<-s.ready
+	return s.listener.Addr().String()
+}

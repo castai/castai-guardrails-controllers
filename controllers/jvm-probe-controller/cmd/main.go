@@ -46,6 +46,7 @@ var (
 	webhookAddr string
 	tlsCertFile string
 	tlsKeyFile  string
+	healthAddr  string
 
 	clientset      *kubernetes.Clientset
 	config         *JVMConfig
@@ -64,6 +65,7 @@ func init() {
 	flag.StringVar(&webhookAddr, "webhook-addr", ":8443", "Address the admission webhook server listens on (host:port). Use :0 for an ephemeral port in tests.")
 	flag.StringVar(&tlsCertFile, "tls-cert-file", "/etc/webhook/certs/tls.crt", "Path to the TLS certificate (PEM) for the webhook server.")
 	flag.StringVar(&tlsKeyFile, "tls-key-file", "/etc/webhook/certs/tls.key", "Path to the TLS private key (PEM) for the webhook server.")
+	flag.StringVar(&healthAddr, "health-addr", ":8080", "Address the plain-HTTP /healthz server listens on (host:port). Used by kubelet probes. Use :0 for an ephemeral port in tests.")
 }
 
 // Controller represents the JVM Probe Controller. The Deployment and
@@ -148,10 +150,15 @@ func parseExclusionRules(data string) *ExclusionRules {
 }
 
 // Run starts the controller. It boots the ConfigMap informer, waits for
-// the cache to sync, then starts the admission webhook server and blocks
-// until ctx is canceled. The webhook server is the runtime path for
-// probe injection; the Deployment/StatefulSet reconcile loop is gone.
-func (c *Controller) Run(ctx context.Context, webhookServer *WebhookServer) error {
+// the cache to sync, then starts the admission webhook server and the
+// plain-HTTP health server. Both servers are shut down cleanly when ctx
+// is canceled (or when either reports a fatal error, which also cancels
+// ctx so the other server tears down).
+//
+// The webhook server is the runtime path for probe injection; the health
+// server is the runtime path for kubelet probes. The Deployment/
+// StatefulSet reconcile loop is gone.
+func (c *Controller) Run(ctx context.Context, webhookServer *WebhookServer, healthServer *HealthServer) error {
 	defer utilruntime.HandleCrash()
 
 	logAlways("Starting JVM Probe Controller...")
@@ -166,18 +173,44 @@ func (c *Controller) Run(ctx context.Context, webhookServer *WebhookServer) erro
 
 	logAlways("ConfigMap informer synced; admission webhook is the runtime path")
 
-	// Start the webhook server in its own goroutine and block until ctx
-	// is canceled (or the server reports a fatal error).
-	serveErr := make(chan error, 1)
+	// If either server returns a fatal error we want the other to shut
+	// down too. Drive that with a child context we can cancel locally.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	expected := 1
+	serveErr := make(chan error, 2)
 	go func() {
-		serveErr <- webhookServer.Start(ctx)
+		serveErr <- webhookServer.Start(runCtx)
 	}()
+	if healthServer != nil {
+		expected = 2
+		go func() {
+			serveErr <- healthServer.Start(runCtx)
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
-		return nil
+		// Parent cancellation: wait for all servers to drain so their
+		// goroutines exit cleanly before Run returns.
+		var firstErr error
+		for i := 0; i < expected; i++ {
+			if err := <-serveErr; err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
 	case err := <-serveErr:
-		return err
+		// One of the servers failed; cancel the other so it tears down.
+		cancel()
+		firstErr := err
+		for i := 1; i < expected; i++ {
+			if e := <-serveErr; e != nil && firstErr == nil {
+				firstErr = e
+			}
+		}
+		return firstErr
 	}
 }
 
@@ -255,6 +288,11 @@ func main() {
 	})
 	webhookServer := NewWebhookServer(webhookAddr, tlsCertFile, tlsKeyFile, mutateHandler)
 
+	// Build the plain-HTTP health server for kubelet probes. It only
+	// serves /healthz; /metrics and /mutate/pods stay on the HTTPS
+	// webhook port.
+	healthServer := NewHealthServer(healthAddr)
+
 	// Create context with cancel
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -268,9 +306,9 @@ func main() {
 		cancel()
 	}()
 
-	logAlways("Starting JVM Probe admission webhook on %s (tls=%s,%s)",
-		webhookAddr, tlsCertFile, tlsKeyFile)
-	if err := controller.Run(ctx, webhookServer); err != nil {
+	logAlways("Starting JVM Probe admission webhook on %s (tls=%s,%s) and health server on %s",
+		webhookAddr, tlsCertFile, tlsKeyFile, healthAddr)
+	if err := controller.Run(ctx, webhookServer, healthServer); err != nil {
 		log.Fatalf("Controller run failed: %v", err)
 	}
 }

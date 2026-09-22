@@ -233,3 +233,102 @@ func (s *WebhookServer) Addr() string {
 	<-s.ready
 	return s.listener.Addr().String()
 }
+
+// HealthServer is a minimal plain-HTTP server that serves /healthz for
+// kubelet probes. It is intentionally separate from WebhookServer so that
+// readiness/liveness probes do not produce TLS handshake errors against
+// the HTTPS webhook listener.
+//
+// HealthServer exposes ONLY /healthz on plain HTTP. /metrics and the
+// admission mutate endpoint are deliberately NOT served from this port;
+// those endpoints are reachable only via the encrypted webhook port.
+type HealthServer struct {
+	addr string
+	mux  *http.ServeMux
+	// server is the underlying *http.Server. It is assigned in Start so
+	// the field can stay nil before the server is running; this matches
+	// the lifecycle of WebhookServer.server.
+	server *http.Server
+	// listener is the bound TCP listener. It is published via close(ready)
+	// before Start returns from its bind step, so Addr() is race-free
+	// for any caller that runs after Start has signalled readiness.
+	listener net.Listener
+	// ready is closed once listener has been assigned. Addr() waits on
+	// this channel so callers cannot read a half-initialised listener.
+	ready chan struct{}
+}
+
+// NewHealthServer builds a HealthServer bound to addr. addr may include a
+// port of ":0" (or "127.0.0.1:0") for tests that need an ephemeral port.
+// Only /healthz is registered; all other paths return 404 from the default
+// mux.
+func NewHealthServer(addr string) *HealthServer {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	return &HealthServer{
+		addr:  addr,
+		mux:   mux,
+		ready: make(chan struct{}),
+	}
+}
+
+// Start binds the listener and serves until ctx is canceled or the server
+// returns an error. It blocks for the lifetime of the server; callers run
+// it in a goroutine and signal shutdown via ctx.
+//
+// When ctx is canceled, Start performs a graceful shutdown bounded by
+// webhookShutdownTimeout and returns nil. The function mirrors
+// WebhookServer.Start so both servers can be started from the same
+// orchestration site with identical lifecycle semantics.
+func (s *HealthServer) Start(ctx context.Context) error {
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return fmt.Errorf("health listen on %s: %w", s.addr, err)
+	}
+	s.listener = ln
+
+	s.server = &http.Server{
+		Handler:           s.mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		err := s.server.Serve(ln)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
+			return
+		}
+		serveErr <- nil
+	}()
+
+	// Publishing readiness is the happens-before edge for any caller that
+	// reads Addr(): after close(s.ready) returns, the listener field is
+	// visible.
+	close(s.ready)
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), webhookShutdownTimeout)
+		defer cancel()
+		if err := s.server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			<-serveErr
+			return fmt.Errorf("health shutdown: %w", err)
+		}
+		// Drain Serve so the goroutine always exits before Start returns.
+		<-serveErr
+		return nil
+	case err := <-serveErr:
+		return err
+	}
+}
+
+// Addr returns the actual TCP address the health server is listening on.
+// It blocks until the listener has been opened by Start. Callers must
+// invoke Start before Addr; otherwise Addr blocks indefinitely.
+func (s *HealthServer) Addr() string {
+	<-s.ready
+	return s.listener.Addr().String()
+}

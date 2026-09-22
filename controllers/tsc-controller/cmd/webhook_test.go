@@ -265,3 +265,178 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+// TestHealthServer_Healthz verifies that the plain-HTTP health server
+// starts on an ephemeral port, serves plain HTTP (not HTTPS), and that
+// /healthz returns 200 OK. /metrics and /mutate/pods must NOT be served
+// from this listener.
+func TestHealthServer_Healthz(t *testing.T) {
+	srv := NewHealthServer("127.0.0.1:0")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Start(ctx) }()
+
+	addr := srv.Addr()
+
+	// Plain-HTTP client (no TLS config) must reach /healthz with 200.
+	// We retry briefly because Start publishes the listener address as
+	// soon as it is bound, but the Accept loop may not be in Serve yet.
+	client := &http.Client{Timeout: 5 * time.Second}
+	url := "http://" + addr + "/healthz"
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := client.Get(url)
+		if err == nil {
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("/healthz status = %d, want 200", resp.StatusCode)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("GET /healthz never succeeded: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// /metrics and /mutate/pods must not be reachable on the health port;
+	// the default mux returns 404 for unregistered paths.
+	for _, path := range []string{"/metrics", "/mutate/pods"} {
+		resp, err := client.Get("http://" + addr + path)
+		if err != nil {
+			t.Fatalf("GET %s on health port: %v", path, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s on health port: status = %d, want 404 (health server must not expose mutate/metrics)", path, resp.StatusCode)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("Start returned error after shutdown: %v", err)
+		}
+	case <-time.After(webhookShutdownTimeout + time.Second):
+		t.Fatalf("Start did not return after context cancel")
+	}
+}
+
+// TestHealthServer_AddrBlocksUntilListening verifies that Addr waits for
+// the listener to be open. We exercise this by starting the server and
+// calling Addr from the main goroutine, then asserting it returns the
+// bound port (an ephemeral port is non-zero).
+func TestHealthServer_AddrBlocksUntilListening(t *testing.T) {
+	srv := NewHealthServer("127.0.0.1:0")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Start(ctx) }()
+
+	addr := srv.Addr()
+	if addr == "" {
+		t.Fatalf("Addr returned empty string")
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", addr, err)
+	}
+	if host != "127.0.0.1" {
+		t.Errorf("host = %q, want 127.0.0.1", host)
+	}
+	if port == "0" {
+		t.Errorf("port = %q, want ephemeral (non-zero)", port)
+	}
+
+	cancel()
+	<-serveErr
+}
+
+// TestWebhookAndHealthServersTogether verifies that the HTTPS webhook
+// server on the ephemeral HTTPS port and the plain-HTTP health server
+// on a separate ephemeral port can run side-by-side. /healthz on the
+// plain HTTP port and /healthz, /metrics, /mutate/pods on the HTTPS
+// port must all succeed. This is the runtime configuration in main.go.
+func TestWebhookAndHealthServersTogether(t *testing.T) {
+	certFile, keyFile, pool := writeSelfSignedCert(t)
+
+	mutate := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}
+	webhook := NewWebhookServer("127.0.0.1:0", certFile, keyFile, mutate)
+	health := NewHealthServer("127.0.0.1:0")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	webhookErr := make(chan error, 1)
+	go func() { webhookErr <- webhook.Start(ctx) }()
+	healthErr := make(chan error, 1)
+	go func() { healthErr <- health.Start(ctx) }()
+
+	tlsClient := testClient(pool)
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+
+	// Wait for both servers to be reachable.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, tlsErr := tlsClient.Get("https://" + webhook.Addr() + "/healthz")
+		_, httpErr := httpClient.Get("http://" + health.Addr() + "/healthz")
+		if tlsErr == nil && httpErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("servers never became reachable: tls=%v http=%v", tlsErr, httpErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// HTTPS endpoints.
+	for _, path := range []string{"/healthz", "/metrics", "/mutate/pods"} {
+		resp, err := tlsClient.Get("https://" + webhook.Addr() + path)
+		if err != nil {
+			t.Fatalf("HTTPS GET %s: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("HTTPS GET %s: status = %d, want 200", path, resp.StatusCode)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+
+	// Plain HTTP /healthz.
+	resp, err := httpClient.Get("http://" + health.Addr() + "/healthz")
+	if err != nil {
+		t.Fatalf("HTTP GET /healthz: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("HTTP GET /healthz: status = %d, want 200", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	cancel()
+	select {
+	case err := <-webhookErr:
+		if err != nil {
+			t.Errorf("webhook Start returned error: %v", err)
+		}
+	case <-time.After(webhookShutdownTimeout + time.Second):
+		t.Fatalf("webhook Start did not return after ctx cancel")
+	}
+	select {
+	case err := <-healthErr:
+		if err != nil {
+			t.Errorf("health Start returned error: %v", err)
+		}
+	case <-time.After(webhookShutdownTimeout + time.Second):
+		t.Fatalf("health Start did not return after ctx cancel")
+	}
+}
