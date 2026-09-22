@@ -265,6 +265,30 @@ func TestParseTSCConfig_ExplicitDoNotSchedulePreserved(t *testing.T) {
 	}
 }
 
+func TestParseTSCConfig_EmptyWhenUnsatisfiableDefaultsToScheduleAnyway(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		Data: map[string]string{
+			"defaultConstraints": `[{"maxSkew":1,"topologyKey":"topology.kubernetes.io/zone"},{"maxSkew":1,"topologyKey":"kubernetes.io/hostname"}]`,
+		},
+	}
+	cfg, errs := ParseTSCConfig(cm, "")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(cfg.DefaultConstraints) != 2 {
+		t.Fatalf("DefaultConstraints len = %d, want 2", len(cfg.DefaultConstraints))
+	}
+	for i, key := range []string{"topology.kubernetes.io/zone", "kubernetes.io/hostname"} {
+		c := cfg.DefaultConstraints[i]
+		if c.TopologyKey != key {
+			t.Errorf("DefaultConstraints[%d].TopologyKey = %q, want %q", i, c.TopologyKey, key)
+		}
+		if c.WhenUnsatisfiable != corev1.ScheduleAnyway {
+			t.Errorf("DefaultConstraints[%d].WhenUnsatisfiable = %q, want %q (empty value must default to soft scheduling)", i, c.WhenUnsatisfiable, corev1.ScheduleAnyway)
+		}
+	}
+}
+
 func TestTSCConfig_StateOf(t *testing.T) {
 	cfg := &TSCConfig{
 		ManagementEnabled: true,
