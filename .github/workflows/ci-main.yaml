@@ -38,6 +38,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      packages: write
     with:
       image_name: castai-tsc-controller
       context: .
@@ -52,6 +53,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      packages: write
     with:
       image_name: castai-jvm-probe-controller
       context: .
