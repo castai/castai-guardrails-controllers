@@ -56,25 +56,38 @@ spec:
             - name: webhook
               containerPort: {{ .Values.service.targetPort }}
               protocol: TCP
+            - name: health
+              containerPort: {{ .Values.health.port }}
+              protocol: TCP
           {{- end }}
           args:
             - -config-namespace={{ .Release.Namespace }}
             {{- if .Values.webhook.enabled }}
             - --webhook-addr={{ .Values.webhook.addr }}
+            - --health-addr={{ .Values.health.addr }}
             - --tls-cert-file=/etc/webhook/certs/tls.crt
             - --tls-key-file=/etc/webhook/certs/tls.key
             {{- end }}
           {{- if .Values.webhook.enabled }}
+          # Probes target the plain-HTTP health server on port 8080 rather
+          # than the HTTPS webhook port, so kubelet does not produce
+          # spurious TLS-handshake EOF errors. The health server serves
+          # only /healthz; metrics and mutation endpoints remain on the
+          # encrypted webhook listener.
           readinessProbe:
-            tcpSocket:
-              port: {{ .Values.service.targetPort }}
+            httpGet:
+              path: /healthz
+              port: health
+              scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
           livenessProbe:
-            tcpSocket:
-              port: {{ .Values.service.targetPort }}
+            httpGet:
+              path: /healthz
+              port: health
+              scheme: HTTP
             initialDelaySeconds: 30
             periodSeconds: 30
             timeoutSeconds: 5

@@ -1386,6 +1386,199 @@ func TestBuildPodProbePatches_ManagementDisabled(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Chunk 3: skip probe injection for generic JVM containers that do not
+// declare any container ports. Port 8080 is only a convention and a bare
+// runtime image (eclipse-temurin, openjdk, etc.) is unlikely to listen on
+// it. Injecting an HTTP probe (or copying an existing one into a startup
+// probe) is actively harmful in that case — kubelet will report
+// "connection refused" forever. Skip the container entirely: no probe
+// patches, no managed annotation. Framework-specific images keep their
+// well-known defaults.
+// ---------------------------------------------------------------------------
+
+// genericJVMPod returns a Pod whose only container is a bare-runtime JVM
+// image with the given port and probe configuration. The framework is
+// detected as FrameworkGeneric because none of the framework-specific
+// patterns match the image name.
+func genericJVMPod(name, image string, ports []corev1.ContainerPort, mutate func(*corev1.Container)) *corev1.Pod {
+	c := corev1.Container{
+		Name:  name,
+		Image: image,
+		Ports: ports,
+	}
+	if mutate != nil {
+		mutate(&c)
+	}
+	return &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{c},
+		},
+	}
+}
+
+// TestBuildPodProbePatches_GenericNoPortsNoProbes_NoPatches covers the
+// observed jvm-samples failure: eclipse-temurin:17-jdk-alpine with no
+// declared ports and no existing probes must not receive any patches
+// (not even the managed annotation). Without the skip, the controller
+// would inject a TCP probe against the default port 8080 and the kubelet
+// would report "connection refused" forever.
+func TestBuildPodProbePatches_GenericNoPortsNoProbes_NoPatches(t *testing.T) {
+	pod := genericJVMPod("jdk", "eclipse-temurin:17-jdk-alpine", nil, nil)
+	result, err := buildPodProbePatches(pod, defaultTestConfig())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.mutationApplied {
+		t.Errorf("mutationApplied = true, want false for generic JVM with no declared ports")
+	}
+	if len(result.patches) != 0 {
+		t.Errorf("patches = %d, want 0 for generic JVM with no declared ports; got: %+v", len(result.patches), result.patches)
+	}
+
+	// Sanity: the managed-annotation patch must also be absent — the
+	// annotation is part of the mutation contract and must not leak
+	// when the container is skipped.
+	if patchExists(result.patches, "/metadata/annotations") ||
+		patchExists(result.patches, "/metadata/annotations/"+escapeJSONPatchKey(AnnotationJVMProbeManaged)) {
+		t.Errorf("managed annotation patch should not be emitted for skipped container; got: %+v", result.patches)
+	}
+}
+
+// TestBuildPodProbePatches_GenericNoPortsWithHTTPProbes_NoPatches covers
+// the original symptom precisely: a bare-runtime image that *does* carry
+// an HTTP liveness/readiness probe (e.g. inherited from a Helm chart
+// template) but no declared container ports. The previous algorithm
+// would copy the existing HTTP probe into a startup probe, again
+// pointing at port 8080, which is not listening. The chunk-3 fix must
+// skip the container entirely so no probe patches (and no managed
+// annotation) are emitted.
+func TestBuildPodProbePatches_GenericNoPortsWithHTTPProbes_NoPatches(t *testing.T) {
+	pod := genericJVMPod("jdk", "eclipse-temurin:17-jdk-alpine", nil, func(c *corev1.Container) {
+		c.LivenessProbe = httpGetLiveness("/health")
+		c.ReadinessProbe = httpGetLiveness("/health")
+	})
+	result, err := buildPodProbePatches(pod, defaultTestConfig())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.mutationApplied {
+		t.Errorf("mutationApplied = true, want false for generic JVM with no declared ports (even with existing HTTP probes)")
+	}
+	if len(result.patches) != 0 {
+		t.Errorf("patches = %d, want 0; got: %+v", len(result.patches), result.patches)
+	}
+	// In particular, no startup probe patch — the previous bug copied
+	// the liveness probe here.
+	if patchExists(result.patches, "/spec/containers/0/startupProbe") {
+		t.Errorf("did not expect startupProbe patch when generic JVM has no declared ports; got: %+v", result.patches)
+	}
+	if patchExists(result.patches, "/metadata/annotations") ||
+		patchExists(result.patches, "/metadata/annotations/"+escapeJSONPatchKey(AnnotationJVMProbeManaged)) {
+		t.Errorf("managed annotation patch should not be emitted for skipped container; got: %+v", result.patches)
+	}
+}
+
+// TestBuildPodProbePatches_GenericWithDeclaredPort_TCPProbesInjected
+// verifies the negative half of the skip rule: as soon as the generic
+// JVM container declares a port (here 8080), the controller must resume
+// injection and emit TCP probes (generic framework default).
+func TestBuildPodProbePatches_GenericWithDeclaredPort_TCPProbesInjected(t *testing.T) {
+	pod := genericJVMPod("jdk", "eclipse-temurin:17-jdk-alpine",
+		[]corev1.ContainerPort{{Name: "http", ContainerPort: 8080}}, nil)
+	result, err := buildPodProbePatches(pod, defaultTestConfig())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.mutationApplied {
+		t.Fatalf("mutationApplied = false, want true for generic JVM with declared port 8080")
+	}
+
+	// Generic framework uses TCP socket probes for readiness and startup
+	// (InjectLivenessProbe is false by default). Verify both probe paths
+	// and that they are TCP-socket probes.
+	readinessPatch := findPatch(result.patches, "/spec/containers/0/readinessProbe")
+	if readinessPatch == nil {
+		t.Fatalf("expected readinessProbe patch; got: %+v", result.patches)
+	}
+	readiness := decodeProbe(t, readinessPatch.Value)
+	if readiness.TCPSocket == nil {
+		t.Errorf("readinessProbe is not a TCPSocket probe; got %+v", readiness)
+	}
+
+	startupPatch := findPatch(result.patches, "/spec/containers/0/startupProbe")
+	if startupPatch == nil {
+		t.Fatalf("expected startupProbe patch; got: %+v", result.patches)
+	}
+	startup := decodeProbe(t, startupPatch.Value)
+	if startup.TCPSocket == nil {
+		t.Errorf("startupProbe is not a TCPSocket probe; got %+v", startup)
+	}
+
+	// Managed annotation must be present.
+	if !patchExists(result.patches, "/metadata/annotations/"+escapeJSONPatchKey(AnnotationJVMProbeManaged)) &&
+		!patchExists(result.patches, "/metadata/annotations") {
+		t.Errorf("expected managed annotation patch; got: %+v", result.patches)
+	}
+}
+
+// TestBuildPodProbePatches_SpringBootNoPorts_HTTPProbesInjected
+// verifies that framework-specific images are NOT subject to the
+// skip rule: Spring Boot's well-known default port (8080) and paths
+// (/actuator/health/liveness, /actuator/health/readiness) must still
+// be injected even when the container has not declared any ports.
+//
+// The config disables readiness injection so the algorithm falls
+// through to the framework-built startup probe path (/actuator/health).
+// Either way, the assertion the chunk-3 spec requires is that HTTP
+// probes are still emitted on 8080 — the framework-specific default.
+func TestBuildPodProbePatches_SpringBootNoPorts_HTTPProbesInjected(t *testing.T) {
+	cfg := DefaultJVMConfig()
+	cfg.InjectReadinessProbe = false
+	cfg.InjectLivenessProbe = false
+
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				jvmContainer("app", func(c *corev1.Container) {
+					// Override the helper's port 8080 with no declared
+					// ports to prove Spring Boot is unaffected by the
+					// generic-only skip.
+					c.Ports = nil
+				}),
+			},
+		},
+	}
+	result, err := buildPodProbePatches(pod, &cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.mutationApplied {
+		t.Fatalf("mutationApplied = false, want true for Spring Boot with no declared ports (framework skip must NOT apply)")
+	}
+
+	startupPatch := findPatch(result.patches, "/spec/containers/0/startupProbe")
+	if startupPatch == nil {
+		t.Fatalf("expected startupProbe patch; got: %+v", result.patches)
+	}
+	startup := decodeProbe(t, startupPatch.Value)
+	if startup.HTTPGet == nil {
+		t.Fatalf("startupProbe is not an HTTPGet probe (framework-specific default expected); got %+v", startup)
+	}
+	if startup.HTTPGet.Path != "/actuator/health" {
+		t.Errorf("startup HTTPGet.Path = %q, want /actuator/health", startup.HTTPGet.Path)
+	}
+	if startup.HTTPGet.Port.IntVal != 8080 && startup.HTTPGet.Port.StrVal != "8080" {
+		t.Errorf("startup HTTPGet.Port = %+v, want 8080", startup.HTTPGet.Port)
+	}
+
+	// Managed annotation must be present.
+	if !patchExists(result.patches, "/metadata/annotations/"+escapeJSONPatchKey(AnnotationJVMProbeManaged)) &&
+		!patchExists(result.patches, "/metadata/annotations") {
+		t.Errorf("expected managed annotation patch; got: %+v", result.patches)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 

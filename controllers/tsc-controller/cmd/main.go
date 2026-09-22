@@ -60,6 +60,7 @@ var (
 	kubeconfig      string
 	configNamespace string
 	webhookAddr     string
+	healthAddr      string
 	tlsCertFile     string
 	tlsKeyFile      string
 
@@ -119,6 +120,7 @@ func init() {
 	flag.StringVar(&configNamespace, "config-namespace", ConfigMapNamespace, "ConfigMap namespace")
 
 	flag.StringVar(&webhookAddr, "webhook-addr", ":8443", "Address the admission webhook server listens on (host:port). Use :0 for an ephemeral port in tests.")
+	flag.StringVar(&healthAddr, "health-addr", ":8080", "Address the plain-HTTP health server listens on (host:port). Used for kubelet readiness/liveness probes. Use :0 for an ephemeral port in tests.")
 	flag.StringVar(&tlsCertFile, "tls-cert-file", "/etc/webhook/certs/tls.crt", "Path to the TLS certificate (PEM) for the webhook server.")
 	flag.StringVar(&tlsKeyFile, "tls-key-file", "/etc/webhook/certs/tls.key", "Path to the TLS private key (PEM) for the webhook server.")
 }
@@ -201,9 +203,10 @@ func main() {
 		handlePodAdmission(w, r)
 	})
 	webhookServer := NewWebhookServer(webhookAddr, tlsCertFile, tlsKeyFile, mutateHandler)
+	healthServer := NewHealthServer(healthAddr)
 
-	logAlways("Starting TSC admission webhook on %s (tls=%s,%s)", webhookAddr, tlsCertFile, tlsKeyFile)
-	if err := controller.Run(ctx, webhookServer); err != nil {
+	logAlways("Starting TSC admission webhook on %s (tls=%s,%s) and health server on %s", webhookAddr, tlsCertFile, tlsKeyFile, healthAddr)
+	if err := controller.Run(ctx, webhookServer, healthServer); err != nil {
 		logAlways("Controller run failed: %v", err)
 		os.Exit(1)
 	}
@@ -262,13 +265,22 @@ func NewController(clientset kubernetes.Interface, factory informers.SharedInfor
 }
 
 // Run starts the controller: it boots the informer factory, waits for the
-// ConfigMap cache to sync, then runs the admission webhook server and
-// blocks until ctx is canceled or the server reports a fatal error.
+// ConfigMap cache to sync, then runs the admission webhook server and the
+// plain-HTTP health server and blocks until ctx is canceled or either
+// server reports a fatal error.
+//
+// Both servers share the same derived context, so a single ctx cancel
+// shuts down both. If one server returns an error, Run cancels the
+// derived context so the other server also shuts down cleanly. They run
+// in independent goroutines so a panic or slow shutdown in one does not
+// block the other.
 //
 // Unlike the legacy informer-based loop, this Run does NOT participate in
 // leader election. Admission webhooks must accept traffic on every replica
 // so Pod creation is never dropped during a leader transition.
-func (c *Controller) Run(ctx context.Context, webhookServer *WebhookServer) error {
+func (c *Controller) Run(ctx context.Context, webhookServer *WebhookServer, healthServer *HealthServer) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	c.ctx = ctx
 
 	// Start informers
@@ -282,15 +294,30 @@ func (c *Controller) Run(ctx context.Context, webhookServer *WebhookServer) erro
 
 	logAlways("ConfigMap informer synced; admission webhook is the runtime path")
 
-	serveErr := make(chan error, 1)
-	go func() {
-		serveErr <- webhookServer.Start(ctx)
-	}()
+	webhookErr := make(chan error, 1)
+	go func() { webhookErr <- webhookServer.Start(ctx) }()
+	healthErr := make(chan error, 1)
+	go func() { healthErr <- healthServer.Start(ctx) }()
 
 	select {
 	case <-ctx.Done():
+		// Both servers observe ctx.Done() internally and perform graceful
+		// shutdown. Wait for them so the function does not return until
+		// the listeners are fully released.
+		<-webhookErr
+		<-healthErr
 		return nil
-	case err := <-serveErr:
+	case err := <-webhookErr:
+		// Cancel so the health server also shuts down. We then wait for
+		// its graceful shutdown before returning so listeners are
+		// released.
+		cancel()
+		<-healthErr
+		return err
+	case err := <-healthErr:
+		// Symmetric: cancel so the webhook server also shuts down.
+		cancel()
+		<-webhookErr
 		return err
 	}
 }

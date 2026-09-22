@@ -55,25 +55,33 @@ spec:
             - name: webhook
               containerPort: {{ .Values.service.targetPort }}
               protocol: TCP
+            - name: health
+              containerPort: {{ .Values.health.port }}
+              protocol: TCP
           {{- end }}
           args:
             - -config-namespace={{ .Release.Namespace }}
             {{- if .Values.webhook.enabled }}
             - --webhook-addr={{ .Values.webhook.addr }}
+            - --health-addr={{ .Values.health.addr }}
             - --tls-cert-file=/etc/webhook/certs/tls.crt
             - --tls-key-file=/etc/webhook/certs/tls.key
             {{- end }}
           {{- if .Values.webhook.enabled }}
           readinessProbe:
-            tcpSocket:
-              port: {{ .Values.service.targetPort }}
+            httpGet:
+              path: /healthz
+              port: health
+              scheme: HTTP
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3
           livenessProbe:
-            tcpSocket:
-              port: {{ .Values.service.targetPort }}
+            httpGet:
+              path: /healthz
+              port: health
+              scheme: HTTP
             initialDelaySeconds: 30
             periodSeconds: 30
             timeoutSeconds: 5

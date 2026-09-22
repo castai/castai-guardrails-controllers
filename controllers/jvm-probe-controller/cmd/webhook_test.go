@@ -219,3 +219,209 @@ func TestWebhookServer_StopIsIdempotent(t *testing.T) {
 		t.Errorf("second Stop returned error: %v", err)
 	}
 }
+
+// TestHealthServer_Healthz verifies that the plain-HTTP health server
+// binds an ephemeral port and returns 200 OK on /healthz. It does not
+// rely on TLS, so a plain http.Client is used.
+func TestHealthServer_Healthz(t *testing.T) {
+	srv := NewHealthServer("127.0.0.1:0")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Start(ctx) }()
+
+	addr := srv.Addr()
+	url := "http://" + addr + "/healthz"
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err := client.Get(url)
+		if err == nil {
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("/healthz status = %d, want 200", resp.StatusCode)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("GET /healthz never succeeded: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("Start returned error after shutdown: %v", err)
+		}
+	case <-time.After(webhookShutdownTimeout + time.Second):
+		t.Fatalf("Start did not return after context cancel")
+	}
+}
+
+// TestHealthServer_OnlyServesHealthz verifies that /metrics and
+// /mutate/pods are NOT exposed on the plain-HTTP health port. The
+// kubelet probes must never reach the admission webhook port via this
+// listener.
+func TestHealthServer_OnlyServesHealthz(t *testing.T) {
+	srv := NewHealthServer("127.0.0.1:0")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Start(ctx) }()
+
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			// Treat plain HTTP 404 as a valid response so we can inspect
+			// the status code rather than getting a transport error.
+			DisableKeepAlives: true,
+		},
+	}
+	for _, path := range []string{"/metrics", "/mutate/pods"} {
+		resp, err := client.Get("http://" + srv.Addr() + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s status = %d, want 404 (path must not be served on the plain-HTTP health port)", path, resp.StatusCode)
+		}
+	}
+
+	cancel()
+	<-serveErr
+}
+
+// TestHealthServer_StopIsIdempotent mirrors TestWebhookServer_StopIsIdempotent
+// for the plain-HTTP server.
+func TestHealthServer_StopIsIdempotent(t *testing.T) {
+	srv := NewHealthServer("127.0.0.1:0")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Start(ctx) }()
+
+	_ = srv.Addr()
+
+	cancel()
+	<-serveErr
+
+	if err := srv.Stop(context.Background()); err != nil {
+		t.Errorf("Stop after shutdown returned error: %v", err)
+	}
+	if err := srv.Stop(context.Background()); err != nil {
+		t.Errorf("second Stop returned error: %v", err)
+	}
+}
+
+// TestHealthAndWebhookCoexist verifies that the HTTPS webhook server and
+// the plain-HTTP health server can run side by side on independent
+// ephemeral ports. A request to /healthz on each port must succeed; a
+// request to /mutate/pods on the HTTPS port must succeed; a request to
+// /mutate/pods on the HTTP port must be rejected.
+func TestHealthAndWebhookCoexist(t *testing.T) {
+	certFile, keyFile, pool := writeSelfSignedCert(t)
+
+	mutate := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}
+	webhook := NewWebhookServer("127.0.0.1:0", certFile, keyFile, mutate)
+	health := NewHealthServer("127.0.0.1:0")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	webhookErr := make(chan error, 1)
+	healthErr := make(chan error, 1)
+	go func() { webhookErr <- webhook.Start(ctx) }()
+	go func() { healthErr <- health.Start(ctx) }()
+
+	webhookAddr := webhook.Addr()
+	healthAddr := health.Addr()
+	if webhookAddr == healthAddr {
+		t.Fatalf("expected different ports, both bound %s", webhookAddr)
+	}
+
+	httpsClient := testClient(pool)
+	httpClient := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
+	}
+
+	// /healthz on the plain-HTTP port must succeed.
+	resp, err := httpClient.Get("http://" + healthAddr + "/healthz")
+	if err != nil {
+		t.Fatalf("HTTP GET /healthz: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("HTTP /healthz status = %d, want 200", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	// /mutate/pods on the HTTPS port must succeed.
+	resp, err = httpsClient.Get("https://" + webhookAddr + "/mutate/pods")
+	if err != nil {
+		t.Fatalf("HTTPS GET /mutate/pods: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("HTTPS /mutate/pods status = %d, want 200", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+
+	// /mutate/pods on the plain-HTTP port must NOT be served.
+	resp, err = httpClient.Get("http://" + healthAddr + "/mutate/pods")
+	if err != nil {
+		t.Fatalf("HTTP GET /mutate/pods: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		t.Errorf("HTTP /mutate/pods status = %d, want 404 (must not be served on the plain-HTTP health port)", resp.StatusCode)
+	} else {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+
+	// /metrics on the plain-HTTP port must NOT be served.
+	resp, err = httpClient.Get("http://" + healthAddr + "/metrics")
+	if err != nil {
+		t.Fatalf("HTTP GET /metrics: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		t.Errorf("HTTP /metrics status = %d, want 404 (must not be served on the plain-HTTP health port)", resp.StatusCode)
+	} else {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+
+	cancel()
+	select {
+	case err := <-webhookErr:
+		if err != nil {
+			t.Errorf("webhook Start returned error after shutdown: %v", err)
+		}
+	case <-time.After(webhookShutdownTimeout + time.Second):
+		t.Fatalf("webhook Start did not return after context cancel")
+	}
+	select {
+	case err := <-healthErr:
+		if err != nil {
+			t.Errorf("health Start returned error after shutdown: %v", err)
+		}
+	case <-time.After(webhookShutdownTimeout + time.Second):
+		t.Fatalf("health Start did not return after context cancel")
+	}
+}

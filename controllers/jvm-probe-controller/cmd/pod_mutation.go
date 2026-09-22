@@ -232,6 +232,20 @@ func buildContainerPatches(
 
 	basePath := fmt.Sprintf("/spec/containers/%d", containerIndex)
 
+	// Step 0: defensive skip for bare-runtime JVM containers. When the
+	// detected framework is generic and the container has not declared
+	// any ports, we have no reliable target to probe: port 8080 is only a
+	// convention, and copying an existing liveness/readiness probe into
+	// a startup probe is just as harmful as injecting a fresh one. We
+	// therefore skip the container entirely — no probe patches, no
+	// managed annotation — to match the behaviour expected for sample
+	// pods (e.g. eclipse-temurin:17-jdk-alpine). Framework-specific
+	// images (Spring Boot, Quarkus, Micronaut) keep their well-known
+	// defaults and are not skipped here.
+	if framework == FrameworkGeneric && len(container.Ports) == 0 {
+		return patches, nil
+	}
+
 	// Step 1: build framework-based probes up-front so the same call can
 	// serve both as "fill a missing probe" and as the startup fallback when
 	// neither liveness nor readiness exists.
