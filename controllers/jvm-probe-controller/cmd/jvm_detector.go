@@ -57,8 +57,29 @@ const (
 )
 
 // Framework-specific image patterns (word-boundary regex)
+//
+// The spring patterns intentionally go beyond the strict word-boundary
+// `\bspring\b` so that image names like `springio/petclinic` and
+// `spring-boot-app` are still detected as Spring Boot. The strict pattern
+// misses `springio` because `spring` is not followed by a word boundary,
+// so we add two follow-ups:
+//
+//  1. `\bspring[-_.]` — matches `spring-boot`, `spring_boot`, `spring.io`.
+//  2. `(?:^|[/:])spring(?:[-_.a-z0-9]*)/` — matches `spring` as a path
+//     segment (e.g. `springio/petclinic`, `my-registry/spring-boot-app/foo`).
+//
+// These patterns are best-effort regex matches: they will also catch
+// unrelated image names that contain `spring` as a path segment prefix
+// (e.g. `springfield/api`). This is an accepted trade-off — the
+// detector's job is to flag likely JVM workloads, and the worst-case
+// false positive only adds redundant Spring Boot probes to a
+// non-Spring workload. The corresponding negative test covers the
+// unambiguous case: a tag-only image with no path separator after
+// `spring` must not match.
 var springBootImagePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bspring\b`),
+	regexp.MustCompile(`\bspring[-_.]`),
+	regexp.MustCompile(`(?:^|[/:])spring(?:[-_.a-z0-9]*)/`),
 	regexp.MustCompile(`\bboot\b`),
 }
 

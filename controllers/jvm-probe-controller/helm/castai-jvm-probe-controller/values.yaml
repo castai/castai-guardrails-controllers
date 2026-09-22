@@ -4,9 +4,9 @@
 replicaCount: 2
 
 image:
-  # GitHub Container Registry. Use imagePullSecrets on the pod if required for your cluster.
-  repository: ghcr.io/castai/images/castai-jvm-probe-controller
-  tag: ""  # empty -> falls back to Chart.yaml appVersion (currently 0.0.17)
+  # GCP Artifact Registry (castai-hub). Use imagePullSecrets on the pod if required for your cluster.
+  repository: us-docker.pkg.dev/castai-hub/library/castai-jvm-probe-controller
+  tag: ""  # empty -> falls back to Chart.yaml appVersion (currently 0.0.15)
   # Container image pull policy
   pullPolicy: IfNotPresent
 
@@ -244,7 +244,10 @@ rbac:
 # Pod disruption budget for the controller
 podDisruptionBudget:
   enabled: true
-  minAvailable: 1
+  # `maxUnavailable: 1` allows voluntary rollouts to drain one replica
+  # at a time while the other keeps serving. This is required because
+  # the Deployment below also sets `maxUnavailable: 1`.
+  maxUnavailable: 1
 
 # Priority class for the controller pods
 priorityClassName: ""
@@ -254,4 +257,8 @@ updateStrategy:
   type: RollingUpdate
   rollingUpdate:
     maxSurge: 1
-    maxUnavailable: 0
+    # Setting maxUnavailable > 0 is required so the rolling update can
+    # replace a pod while the other replica continues serving. With
+    # maxUnavailable: 0 the update is blocked because the PDB forbids
+    # any unavailable pod during the swap.
+    maxUnavailable: 1

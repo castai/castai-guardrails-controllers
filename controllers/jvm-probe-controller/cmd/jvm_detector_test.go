@@ -137,6 +137,60 @@ func TestDetectContainerPort_NoPorts(t *testing.T) {
 	}
 }
 
+// TestDetectJVMContainer_SpringioPetclinicDetectedAsSpringBoot verifies
+// that image names like `springio/petclinic` are detected as Spring Boot
+// workloads. The strict `\bspring\b` pattern misses `springio` because
+// `spring` is not followed by a word boundary; the relaxed patterns must
+// still catch the image and classify the framework correctly.
+func TestDetectJVMContainer_SpringioPetclinicDetectedAsSpringBoot(t *testing.T) {
+	cases := []struct {
+		name  string
+		image string
+	}{
+		{"springio-org-image", "springio/petclinic:latest"},
+		{"springio-no-tag", "springio/petclinic"},
+		{"spring-boot-app", "my-registry/spring-boot-app:1.0"},
+		{"spring_underscore", "my-registry/spring_app:1.0"},
+		{"spring-dot", "my-registry/spring.app:1.0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			container := corev1.Container{
+				Name:  "app",
+				Image: tc.image,
+				Ports: []corev1.ContainerPort{{ContainerPort: 8080}},
+			}
+			info := DetectJVMContainer(container)
+			if !info.IsJVM {
+				t.Errorf("image %q: IsJVM = false, want true", tc.image)
+			}
+			if info.Framework != FrameworkSpringBoot {
+				t.Errorf("image %q: Framework = %q, want %q", tc.image, info.Framework, FrameworkSpringBoot)
+			}
+		})
+	}
+}
+
+// TestDetectJVMContainer_DoesNotClassifyUnrelatedSpringWordAsSpringBoot
+// guards against over-matching by the relaxed Spring Boot patterns on
+// the unambiguous case: a tag-only image with no path separator after
+// `spring` must not match. `springfield-api:1.0` has no `/` between
+// `spring` and the tag separator, so the relaxed patterns must skip it.
+func TestDetectJVMContainer_DoesNotClassifyUnrelatedSpringWordAsSpringBoot(t *testing.T) {
+	container := corev1.Container{
+		Name:  "app",
+		Image: "my-registry/springfield-api:1.0",
+		Ports: []corev1.ContainerPort{{ContainerPort: 8080}},
+	}
+	info := DetectJVMContainer(container)
+	if info.IsJVM {
+		t.Errorf("image %q: IsJVM = true, want false (false-positive guard)", container.Image)
+	}
+	if info.Framework == FrameworkSpringBoot {
+		t.Errorf("image %q: Framework = spring-boot, want non-Spring", container.Image)
+	}
+}
+
 // TestDetectJVMContainer_PopulatesPortName verifies that DetectJVMContainer
 // forwards the portName discovered by detectContainerPort into the
 // returned ContainerInfo struct.

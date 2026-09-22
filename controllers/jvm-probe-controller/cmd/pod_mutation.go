@@ -157,6 +157,16 @@ func buildPodProbePatches(pod *corev1.Pod, cfg *JVMConfig) (*podMutationResult, 
 		container := &pod.Spec.Containers[idx]
 
 		containerInfo := DetectJVMContainer(*container)
+		// Allow the workloads.cast.ai/jvm-probe-framework annotation to
+		// force JVM detection for non-JVM images. We require a declared
+		// container port so the controller never fabricates probes against
+		// an unknown listener — port 8080 is only a convention. The
+		// override is treated as authoritative: framework detection from
+		// the image is replaced with the annotation value below.
+		if !containerInfo.IsJVM && frameworkOverride != "" && len(container.Ports) > 0 {
+			containerInfo.IsJVM = true
+			containerInfo.Framework = frameworkOverride
+		}
 		if !containerInfo.IsJVM {
 			continue
 		}
