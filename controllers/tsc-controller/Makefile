@@ -1,7 +1,9 @@
 # Variables
 BINARY_NAME := tsc-controller
-DOCKER_IMAGE := castai/tsc-controller
+DOCKER_USER ?= castai
+DOCKER_IMAGE := $(DOCKER_USER)/tsc-controller
 VERSION ?= latest
+PLATFORM ?=
 GO := go
 GOFLAGS := -v
 LDFLAGS := -w -s
@@ -9,7 +11,7 @@ LDFLAGS := -w -s
 # Go module settings
 MODULE := github.com/castai/sales-engineering-snaphot-analyzer/workload-autopilot/controllers/tsc-controller
 
-.PHONY: all build test clean docker-build docker-push lint fmt vet help
+.PHONY: all build test clean docker-build docker-push docker-build-push lint fmt vet help
 
 # Default target
 all: build
@@ -27,13 +29,17 @@ clean:
 	rm -f $(BINARY_NAME)
 	rm -rf dist/
 
-# Build Docker image
+# Build Docker image (context is the repo root so ../../apis, ../../clientset,
+# ../../snapshot replace directives resolve).
 docker-build:
-	docker build -t $(DOCKER_IMAGE):$(VERSION) .
+	docker build $(if $(PLATFORM),--platform $(PLATFORM),) -f Dockerfile -t $(DOCKER_IMAGE):$(VERSION) ../..
 
 # Push Docker image
 docker-push: docker-build
 	docker push $(DOCKER_IMAGE):$(VERSION)
+
+# Build and push Docker image
+docker-build-push: docker-build docker-push
 
 # Run linter
 lint:
@@ -69,8 +75,9 @@ help:
 	@echo "  build        - Build the binary"
 	@echo "  test         - Run tests"
 	@echo "  clean        - Clean build artifacts"
-	@echo "  docker-build - Build Docker image"
-	@echo "  docker-push  - Push Docker image"
+	@echo "  docker-build     - Build Docker image"
+	@echo "  docker-push      - Push Docker image"
+	@echo "  docker-build-push - Build and push Docker image"
 	@echo "  lint         - Run linter"
 	@echo "  fmt          - Format code"
 	@echo "  vet          - Run go vet"

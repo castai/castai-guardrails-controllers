@@ -213,13 +213,28 @@ func main() {
 }
 
 func buildConfig() (*rest.Config, error) {
+	var cfg *rest.Config
+	var err error
 	if kubeconfig != "" {
-		return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		cfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 			&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig},
 			&clientcmd.ConfigOverrides{ClusterInfo: clientcmdapi.Cluster{Server: masterURL}},
 		).ClientConfig()
+	} else {
+		cfg, err = rest.InClusterConfig()
 	}
-	return rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	// The admission webhook resolves workload owners (ReplicaSet -> Deployment)
+	// on every Pod CREATE. With many concurrent pod creations the default
+	// client-go rate limit (QPS=5, Burst=10) causes throttling and webhook
+	// timeouts, which silently skips mutations because failurePolicy=Ignore.
+	// Defaults here are high enough for burst admission traffic without being
+	// unbounded.
+	cfg.QPS = 50
+	cfg.Burst = 100
+	return cfg, nil
 }
 
 // Controller owns the ConfigMap informer that hot-reloads TSCConfig. The
