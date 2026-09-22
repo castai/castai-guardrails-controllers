@@ -4,8 +4,8 @@
 replicaCount: 2
 
 image:
-  # GCP Artifact Registry (castai-hub). Use imagePullSecrets on the pod if required for your cluster.
-  repository: us-docker.pkg.dev/castai-hub/library/castai-jvm-probe-controller
+  # GitHub Container Registry. Use imagePullSecrets on the pod if required for your cluster.
+  repository: ghcr.io/castai/images/castai-jvm-probe-controller
   tag: ""  # empty -> falls back to Chart.yaml appVersion (currently 0.0.15)
   # Container image pull policy
   pullPolicy: IfNotPresent
