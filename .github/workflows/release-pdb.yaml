@@ -24,7 +24,7 @@ jobs:
       id-token: write
       packages: write
     with:
-      image_name: castai-pdb-controller
+      image_name: castai-pdb
       context: .
       dockerfile: controllers/pdb-controller/Dockerfile
       version: ${{ needs.prepare.outputs.version }}

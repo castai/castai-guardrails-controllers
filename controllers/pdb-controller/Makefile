@@ -1,7 +1,7 @@
 # Makefile for building and pushing a multi-arch Docker image using BuildKit
 
 # Variables — align with Helm default (Artifact Registry castai-hub)
-DOCKER_IMAGE_NAME = us-docker.pkg.dev/castai-hub/library/castai-pdb-controller
+DOCKER_IMAGE_NAME = us-docker.pkg.dev/castai-hub/library/castai-pdb
 DOCKER_IMAGE_TAGS = latest 0.5
 PLATFORMS = linux/amd64,linux/arm64
 
